@@ -29,6 +29,8 @@ npm test
 node examples/e2e-offline.ts
 ```
 
+It also runs in Cloudflare Workers with the `nodejs_compat` flag. Signing never hands node:crypto a `{ key, dsaEncoding }` options object, which workerd rejects for KeyObjects; ES256 converts between DER and the JWS r||s form itself. To check a Workers build, run `npx wrangler dev` in `examples/cloudflare-worker/`, then `node examples/cloudflare-worker/check.ts http://127.0.0.1:8787`: signatures made in workerd must verify in Node, signatures made in Node must verify in workerd, and tampered ones must fail in both.
+
 `npm test` runs every test with `node:test`. A few cross-checks need files from outside this repository. They read only the two environment variables below, with no default paths, and without them they skip and say which variable to set:
 
 - `SOLIDARITY_SITE_DIR`: a folder with the site's checkers and the three spec documents, laid out as on the site. Without it, the tests that run `merkle.js` and `verify.py` against the conformance files, and the one that compares the schemas here with the spec's, skip. To fetch them:
@@ -68,7 +70,7 @@ src/solidarity/       the extension, laid out like @x402/extensions/payment-iden
   processor.ts        processor mode (card and bank rails), as bookkeeping only
 src/sim/chain.ts      the simulated chain: USDC with EIP-3009, a batch-settlement escrow
 conformance/          JSON test vectors for other implementations (see below)
-examples/             the offline flow, and the Base Sepolia script
+examples/             the offline flow, the Base Sepolia script, and a Cloudflare Workers check
 scripts/              the conformance generator
 test/                 node:test suites
 ```

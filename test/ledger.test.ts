@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign as nodeSign, verify as nodeVerify } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import * as S from "../src/solidarity/index.ts";
+import { ecdsaDerToP1363, ecdsaP1363ToDer } from "../src/solidarity/ledger.ts";
 import type { PublishedStatement, Receipt, StatementPayload } from "../src/solidarity/index.ts";
 import { b64url } from "../src/solidarity/utils.ts";
 import { conformance, conformanceText } from "./helpers.ts";
@@ -165,6 +168,68 @@ test("ES256 statements sign and verify with raw r||s", () => {
   const parts = pub.statement.signature.split(".");
   const flipped = `${parts[0]}.${b64url(new TextEncoder().encode(S.canonicalizeStrict({ ...V.statements[1].payload, size: 1 })))}.${parts[2]}`;
   assert.ok(!S.jwsVerify(flipped, k.publicKey));
+});
+
+test("ES256 signs with a bare KeyObject (Cloudflare Workers rejects { key, dsaEncoding })", () => {
+  const src = readFileSync(new URL("../src/solidarity/ledger.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  assert.ok(!/dsaEncoding/.test(src), "ledger.ts must not pass dsaEncoding to node:crypto");
+});
+
+test("ES256 r||s and DER agree with node:crypto's own ieee-p1363 encoding", () => {
+  const data = new TextEncoder().encode("solidarity");
+  for (let i = 0; i < 200; i++) {
+    const k = S.generateSigningKey("ES256", `k${i}`);
+    const p1363 = new Uint8Array(nodeSign("sha256", data, { key: k.privateKey, dsaEncoding: "ieee-p1363" }));
+    const der = new Uint8Array(nodeSign("sha256", data, k.privateKey));
+    assert.ok(nodeVerify("sha256", data, k.publicKey, ecdsaP1363ToDer(p1363)), "r||s -> DER verifies");
+    assert.ok(nodeVerify("sha256", data, { key: k.publicKey, dsaEncoding: "ieee-p1363" }, ecdsaDerToP1363(der)), "DER -> r||s verifies");
+    assert.deepEqual(ecdsaDerToP1363(ecdsaP1363ToDer(p1363)), p1363);
+    assert.deepEqual(ecdsaP1363ToDer(ecdsaDerToP1363(der)), der);
+  }
+});
+
+test("ES256 DER conversion handles short and high-bit scalars and rejects malformed DER", () => {
+  const scalar = (lead: number[], fill: number) => Uint8Array.from([...lead, ...new Array(32 - lead.length).fill(fill)]);
+  const cases = [
+    [scalar([0x80], 0x11), scalar([0x7f], 0x22)], // high bit set needs a 0x00 pad; clear does not
+    [scalar([0x00, 0x90], 0x33), scalar([0x00, 0x00, 0x05], 0x44)], // 31- and 30-byte integers
+    [scalar([], 0x00).map((_, i) => (i === 31 ? 1 : 0)), scalar([0xff], 0xff)], // r = 1
+  ];
+  for (const [r, s] of cases) {
+    const sig = new Uint8Array(64);
+    sig.set(r, 0);
+    sig.set(s, 32);
+    const der = ecdsaP1363ToDer(sig);
+    assert.deepEqual(ecdsaDerToP1363(der), sig);
+    assert.equal(der[1] + 2, der.length);
+  }
+  const good = ecdsaP1363ToDer(Uint8Array.from({ length: 64 }, (_, i) => i + 1));
+  const bad = (f: (d: number[]) => void) => { const d = [...good]; f(d); return Uint8Array.from(d); };
+  assert.throws(() => ecdsaDerToP1363(bad((d) => d.push(0))), /SEQUENCE|trailing/);
+  assert.throws(() => ecdsaDerToP1363(bad((d) => (d[0] = 0x31))), /SEQUENCE/);
+  assert.throws(() => ecdsaDerToP1363(bad((d) => (d[2] = 0x03))), /INTEGER/);
+  assert.throws(() => ecdsaDerToP1363(bad((d) => { d.splice(4, 0, 0x00); d[3]++; d[1]++; })), /not minimal/);
+  assert.throws(() => ecdsaDerToP1363(bad((d) => (d[4] = 0x81))), /negative/);
+  assert.throws(() => ecdsaDerToP1363(new Uint8Array(0)), /SEQUENCE/);
+  assert.throws(() => ecdsaP1363ToDer(new Uint8Array(63)), /64 bytes/);
+  // Trailing bytes inside a SEQUENCE whose length covers them.
+  assert.throws(() => ecdsaDerToP1363(bad((d) => { d.push(0); d[1]++; })), /trailing/);
+  // r = 0 encodes as INTEGER 0 and never parses back; jwsVerify returns false for it.
+  const zeroR = Uint8Array.from({ length: 64 }, (_, i) => (i < 32 ? 0 : 7));
+  assert.deepEqual([...ecdsaP1363ToDer(zeroR).subarray(2, 5)], [0x02, 0x01, 0x00]);
+  assert.throws(() => ecdsaDerToP1363(ecdsaP1363ToDer(zeroR)), /not minimal/);
+  const k = S.generateSigningKey("ES256", "k");
+  const jws = S.jwsSign(new TextEncoder().encode("{}"), k);
+  assert.equal(S.jwsVerify(`${jws.slice(0, jws.lastIndexOf("."))}.${b64url(zeroR)}`, k.publicKey), false);
+});
+
+test("jwsSign refuses a key that does not match its alg", () => {
+  const data = new TextEncoder().encode("{}");
+  const p384 = generateKeyPairSync("ec", { namedCurve: "P-384" });
+  const k1 = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
+  const ed = generateKeyPairSync("ed25519");
+  for (const pair of [p384, k1, ed]) assert.throws(() => S.jwsSign(data, { alg: "ES256", kid: "k", ...pair }), /ES256 needs a P-256 key/);
+  assert.throws(() => S.jwsSign(data, { alg: "EdDSA", kid: "k", ...p384 }), /EdDSA needs an Ed25519 key/);
 });
 
 test("lines and batches reject what the spec rules out", () => {

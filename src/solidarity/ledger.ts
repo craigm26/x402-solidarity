@@ -4,7 +4,10 @@
  * The same in both modes.
  *
  * Signatures use node:crypto: Ed25519 ("EdDSA") and P-256 ("ES256", with the
- * raw r||s encoding JWS requires).
+ * raw r||s encoding JWS requires). Keys are always passed to sign/verify as bare
+ * KeyObjects, never as `{ key, dsaEncoding }`: Cloudflare Workers' node:crypto
+ * rejects a KeyObject inside that options form, so ES256 converts between DER and
+ * r||s here instead.
  */
 
 import type { JsonWebKey, KeyObject } from "node:crypto";
@@ -238,9 +241,71 @@ export function generateSigningKey(alg: JwsAlg, kid: string): SigningKey {
   return { alg, kid, privateKey: pair.privateKey, publicKey: pair.publicKey };
 }
 
+const P256_SCALAR = 32;
+
+/** One DER INTEGER as a fixed-width unsigned big-endian scalar; throws unless minimally encoded and positive. */
+function derIntegerToScalar(der: Uint8Array, at: number): { value: Uint8Array; next: number } {
+  if (der[at] !== 0x02) throw new Error("ECDSA DER: expected INTEGER");
+  const len = der[at + 1];
+  const start = at + 2;
+  if (len === undefined || len < 1 || len > P256_SCALAR + 1 || start + len > der.length) throw new Error("ECDSA DER: bad INTEGER length");
+  let v = der.subarray(start, start + len);
+  if (v[0] & 0x80) throw new Error("ECDSA DER: negative INTEGER");
+  if (v[0] === 0x00) {
+    if (len === 1 || !(v[1] & 0x80)) throw new Error("ECDSA DER: INTEGER not minimal");
+    v = v.subarray(1);
+  }
+  if (v.length > P256_SCALAR) throw new Error("ECDSA DER: INTEGER too long");
+  const value = new Uint8Array(P256_SCALAR);
+  value.set(v, P256_SCALAR - v.length);
+  return { value, next: start + len };
+}
+
+/** DER `SEQUENCE { r INTEGER, s INTEGER }` (what node:crypto signs by default) to JWS r||s (RFC 7518 section 3.4). */
+export function ecdsaDerToP1363(der: Uint8Array): Uint8Array {
+  if (der[0] !== 0x30 || der[1] === undefined || der[1] > 0x7f || der[1] + 2 !== der.length) throw new Error("ECDSA DER: bad SEQUENCE");
+  const r = derIntegerToScalar(der, 2);
+  const s = derIntegerToScalar(der, r.next);
+  if (s.next !== der.length) throw new Error("ECDSA DER: trailing bytes");
+  const out = new Uint8Array(2 * P256_SCALAR);
+  out.set(r.value, 0);
+  out.set(s.value, P256_SCALAR);
+  return out;
+}
+
+function scalarToDerInteger(scalar: Uint8Array): Uint8Array {
+  let i = 0;
+  while (i < scalar.length - 1 && scalar[i] === 0) i++;
+  const v = scalar.subarray(i);
+  const pad = v[0] & 0x80 ? 1 : 0;
+  const out = new Uint8Array(2 + pad + v.length);
+  out[0] = 0x02;
+  out[1] = pad + v.length;
+  out.set(v, 2 + pad);
+  return out;
+}
+
+/** JWS r||s (64 bytes for P-256) to DER, for node:crypto's default verify encoding. */
+export function ecdsaP1363ToDer(sig: Uint8Array): Uint8Array {
+  if (sig.length !== 2 * P256_SCALAR) throw new Error("ES256 signature must be 64 bytes");
+  const r = scalarToDerInteger(sig.subarray(0, P256_SCALAR));
+  const s = scalarToDerInteger(sig.subarray(P256_SCALAR));
+  const out = new Uint8Array(2 + r.length + s.length);
+  out[0] = 0x30;
+  out[1] = r.length + s.length;
+  out.set(r, 2);
+  out.set(s, 2 + r.length);
+  return out;
+}
+
 function rawSign(alg: JwsAlg, data: Uint8Array, key: KeyObject): Uint8Array {
-  if (alg === "EdDSA") return new Uint8Array(nodeSign(null, data, key));
-  return new Uint8Array(nodeSign("sha256", data, { key, dsaEncoding: "ieee-p1363" }));
+  if (alg === "EdDSA") {
+    if (key.asymmetricKeyType !== "ed25519") throw new Error("EdDSA needs an Ed25519 key");
+    return new Uint8Array(nodeSign(null, data, key));
+  }
+  const curve = key.asymmetricKeyDetails?.namedCurve;
+  if (key.asymmetricKeyType !== "ec" || (curve !== "prime256v1" && curve !== "P-256")) throw new Error("ES256 needs a P-256 key");
+  return ecdsaDerToP1363(new Uint8Array(nodeSign("sha256", data, key)));
 }
 
 /** The JWS `alg` is tied to the key type: EdDSA needs an Ed25519 key, ES256 a P-256 key (RFC 7515, RFC 8725 section 3.1). */
@@ -250,7 +315,7 @@ function rawVerify(alg: JwsAlg, data: Uint8Array, key: KeyObject, sig: Uint8Arra
     const curve = key.asymmetricKeyDetails?.namedCurve;
     if (key.asymmetricKeyType !== "ec" || (curve !== "prime256v1" && curve !== "P-256")) return false;
     if (sig.length !== 64) return false;
-    return nodeVerify("sha256", data, { key, dsaEncoding: "ieee-p1363" }, sig);
+    return nodeVerify("sha256", data, key, ecdsaP1363ToDer(sig));
   } catch {
     return false;
   }
