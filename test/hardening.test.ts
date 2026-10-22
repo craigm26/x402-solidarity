@@ -304,6 +304,9 @@ test("the schemas here are the spec's inline schemas", { skip: !SPEC_DOCS.every(
   const example = (name: string) => JSON.parse((new RegExp(`<!-- example:${name} -->\\n\`\`\`json\\n([\\s\\S]*?)\\n\`\`\``).exec(md) as RegExpExecArray)[1]);
   assert.deepEqual(example("payment-required").extensions.solidarity.schema, S.solidaritySchema);
   assert.deepEqual(example("settle-response").extensions.solidarity.schema, S.solidarityOutcomeSchema);
+  assert.deepEqual(example("ap2-constraint-schema"), S.ap2ConstraintSchema);
+  assert.deepEqual(example("ap2-receipt-schema"), S.ap2ReceiptSchema);
+  assert.deepEqual(example("ap2-constraint"), S.processorConstraint({ version: 2, rate: "0.001", cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity", logs: ["https://processor.example/solidarity"], refunds: "keep", since: "2026-10-22T00:00:00Z" }, { holder: "https://processor.example" }));
   const d = example("descriptor");
   assert.equal(d.minWithdrawDelay, undefined, "the channel's delay equals the entry's extra.withdrawDelay");
 });

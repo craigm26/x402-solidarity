@@ -1,0 +1,286 @@
+{
+  "note": "One holder (https://processor.example) evaluates these in order, at 2026-10-10. Every case passes; the receipt property's id is random and left out. `record` means the purchase then became final and its line was recorded under the promised id.",
+  "descriptor": {
+    "version": 2,
+    "log": "https://processor.example/solidarity",
+    "funds": [
+      "https://fund.example/solidarity"
+    ],
+    "keys": [
+      {
+        "kid": "did:web:processor.example#1",
+        "from": "2026-10",
+        "until": null
+      }
+    ]
+  },
+  "iat": 1790812800,
+  "cases": [
+    {
+      "name": "not-the-holder",
+      "self": "https://network.example",
+      "owner": "a",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true
+      }
+    },
+    {
+      "name": "pending",
+      "self": "https://processor.example",
+      "owner": "a",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 5000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "pending"
+        }
+      },
+      "record": "5000"
+    },
+    {
+      "name": "cap-reached",
+      "self": "https://processor.example",
+      "owner": "a",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "cap-reached"
+        }
+      }
+    },
+    {
+      "name": "bad-policy-rate",
+      "self": "https://processor.example",
+      "owner": "b",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.02",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "bad-policy"
+        }
+      }
+    },
+    {
+      "name": "bad-policy-cap-string",
+      "self": "https://processor.example",
+      "owner": "b",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": "50",
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "bad-policy"
+        }
+      }
+    },
+    {
+      "name": "wrong-log",
+      "self": "https://processor.example",
+      "owner": "b",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://other.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "wrong-log"
+        }
+      }
+    },
+    {
+      "name": "fund-not-allowed",
+      "self": "https://processor.example",
+      "owner": "b",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://elsewhere.example/fund",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "fund-not-allowed"
+        }
+      }
+    },
+    {
+      "name": "purchase-not-supported",
+      "self": "https://processor.example",
+      "owner": "b",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 4000,
+        "currency": "EUR"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "purchase-not-supported"
+        }
+      }
+    },
+    {
+      "name": "below-minimum",
+      "self": "https://processor.example",
+      "owner": "b",
+      "constraint": {
+        "type": "com.craigmerry.solidarity",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep"
+      },
+      "payment": {
+        "amount": 99,
+        "currency": "USD"
+      },
+      "want": {
+        "pass": true,
+        "receipt": {
+          "status": "skipped",
+          "reason": "below-minimum"
+        }
+      }
+    }
+  ]
+}

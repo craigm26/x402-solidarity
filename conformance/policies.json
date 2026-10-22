@@ -214,12 +214,12 @@
     }
   ],
   "processorConstraint": {
-    "type": "solidarity",
+    "type": "com.craigmerry.solidarity",
     "holder": "https://processor.example",
     "rate": "0.001",
     "cap": {
-      "amount": "500",
-      "asset": "USD"
+      "amount": 500,
+      "currency": "USD"
     },
     "fund": "https://fund.example/solidarity",
     "logs": [

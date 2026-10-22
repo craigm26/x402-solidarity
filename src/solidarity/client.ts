@@ -25,7 +25,8 @@ import type {
   SolidarityInfo,
   SolidarityOutcome,
 } from "./types.ts";
-import { SOLIDARITY, SOLIDARITY_VERSION } from "./types.ts";
+import { AP2_CONSTRAINT_TYPE, SOLIDARITY, SOLIDARITY_VERSION } from "./types.ts";
+import type { Ap2SolidarityConstraint } from "./types.ts";
 import { solidaritySchema } from "./schema.ts";
 import type { ChannelConfig, Hex, TypedDataSigner } from "./evm.ts";
 import { computeChannelId, signEip3009, signVoucher, verifyVoucherSignature } from "./evm.ts";
@@ -366,26 +367,42 @@ export function readOutcome(settleResponse: { extensions?: Record<string, unknow
 // ---- processor mode: fields only ---------------------------------------------
 
 /**
- * The AP2-style mandate constraint that carries a processor-mode policy
- * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2 and ACP notes", informative):
- * `type`, `holder` (the one party that applies the share) and the policy's
- * `rate`, `cap`, `fund`, `logs` and `refunds`, with `cap` in the policy's units
- * (minor units of an ISO 4217 code on card and bank rails). The mandate's own
- * consent time stands in for the policy's `since`, so neither it nor `version`
- * is carried.
+ * The AP2 Payment Mandate Constraint that carries a processor-mode policy
+ * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Payment Mandate Constraint",
+ * informative): `type`, `holder` (the one party that applies the share) and
+ * the policy's `rate`, `cap`, `fund`, `logs` and `refunds`. `cap` becomes an
+ * AP2 Amount, an integer in minor units of an ISO 4217 code. The open Payment
+ * Mandate's `iat` stands in for the policy's `since`, so neither it nor
+ * `version` is carried.
  */
-export function processorConstraint(policy: OwnerPolicy, opts: { holder: string; logs?: string[] }) {
+export function processorConstraint(policy: OwnerPolicy, opts: { holder: string; logs?: string[] }): Ap2SolidarityConstraint {
   assertPolicy(policy, "processor");
   const logs = opts.logs ?? policy.logs;
   if (!logs || logs.length === 0) throw new Error("the constraint names the holder's log in logs");
+  if (!/^[A-Z]{3}$/.test(policy.cap.asset)) throw new Error("an AP2 constraint's cap is in an ISO 4217 currency code");
+  const amount = Number(policy.cap.amount);
+  if (!Number.isSafeInteger(amount)) throw new Error("cap.amount does not fit an AP2 Amount (a safe integer)");
   return {
-    type: SOLIDARITY,
+    type: AP2_CONSTRAINT_TYPE,
     holder: opts.holder,
     rate: policy.rate,
-    cap: { amount: policy.cap.amount, asset: policy.cap.asset },
+    cap: { amount, currency: policy.cap.asset },
     fund: policy.fund,
     logs: [...logs],
     refunds: policy.refunds ?? "keep",
+  };
+}
+
+/** The owner policy an AP2 constraint carries, with `since` from the open Payment Mandate's `iat`. */
+export function constraintPolicy(c: Ap2SolidarityConstraint, iat: number): OwnerPolicy {
+  return {
+    version: 2,
+    rate: c.rate,
+    cap: { amount: String(c.cap.amount), asset: c.cap.currency },
+    fund: c.fund,
+    logs: [...c.logs],
+    refunds: c.refunds ?? "keep",
+    since: new Date(iat * 1000).toISOString().replace(/\.000Z$/, "Z"),
   };
 }
 
@@ -395,7 +412,7 @@ export function processorConstraint(policy: OwnerPolicy, opts: { holder: string;
  * add `extensions.solidarity`.
  */
 export function mayAttachShare(mandateConstraints: Array<{ type?: string; holder?: string }> | undefined, self: string): boolean {
-  const c = mandateConstraints?.find((x) => x?.type === SOLIDARITY);
+  const c = mandateConstraints?.find((x) => x?.type === AP2_CONSTRAINT_TYPE);
   return !c || c.holder === self;
 }
 

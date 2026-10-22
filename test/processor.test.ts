@@ -106,3 +106,93 @@ test("processor mode: the fund attests its payouts", () => {
   assert.equal(S.verifyReceipt(receipt, { resolveKey, descriptor, requireCosigners: [fundKey.kid] }).ok, true);
   assert.equal(JSON.parse(p.handle(`/proofs/${id}`).body).status, "included");
 });
+
+// ---- AP2: a Payment Mandate Constraint ---------------------------------------------------------
+
+const HOLDER = "https://processor.example";
+const IAT = Date.UTC(2026, 9, 1) / 1000;
+const ap2Constraint = (over: Record<string, unknown> = {}) => ({
+  ...S.processorConstraint({ ...policy("keep"), logs: [descriptor.log] }, { holder: HOLDER }),
+  ...over,
+});
+const usd = (amount: number) => ({ amount, currency: "USD" });
+
+test("AP2 constraint: AP2's own shapes, a collision-resistant type, and the schema accepts it", () => {
+  const c = ap2Constraint();
+  assert.deepEqual(c, { type: "com.craigmerry.solidarity", holder: HOLDER, rate: "0.01", cap: { amount: 100000, currency: "USD" }, fund: FUND, logs: [descriptor.log], refunds: "keep" });
+  assert.deepEqual(S.validateSchema(S.ap2ConstraintSchema, c), []);
+  assert.deepEqual(S.constraintPolicy(c as S.Ap2SolidarityConstraint, IAT), { ...policy("keep"), logs: [descriptor.log] }, "round trip, with since from iat");
+  assert.throws(() => S.processorConstraint({ ...policy("keep"), logs: [descriptor.log], cap: { amount: "100", asset: "usd" } }, { holder: HOLDER }), /ISO 4217/);
+  assert.throws(() => S.processorConstraint({ ...policy("keep"), logs: [descriptor.log], cap: { amount: "9007199254740993", asset: "USD" } }, { holder: HOLDER }), /safe integer/);
+});
+
+test("AP2 evaluation always passes; the holder alone gets a receipt property, and the line uses its id", () => {
+  const { p, clock } = setup("keep");
+  const other = p.evaluateAp2({ self: "https://network.example", owner: "o", constraint: ap2Constraint(), iat: IAT, payment: usd(4000) });
+  assert.deepEqual(other, { pass: true }, "a verifier that is not the holder does nothing");
+
+  const r = p.evaluateAp2({ self: HOLDER, owner: "owner-2", constraint: ap2Constraint(), iat: IAT, payment: usd(20000) });
+  assert.equal(r.pass, true);
+  assert.equal(r.receipt?.status, "pending");
+  assert.deepEqual(S.validateSchema(S.ap2ReceiptSchema, r.receipt), []);
+  const id = (r.receipt as { id: string }).id;
+  assert.throws(() => p.recordPurchase({ owner: "owner-1", purchaseId: "x", amount: "4000", asset: "USD", id }), /reserved/, "an id belongs to its owner");
+  assert.equal(p.recordPurchase({ owner: "owner-2", purchaseId: "p-ap2", amount: "20000", asset: "USD", id }), id, "the line is recorded under the promised id");
+  assert.equal(p.shareAmount(id), 200n);
+  assert.throws(() => p.recordPurchase({ owner: "owner-2", purchaseId: "p-again", amount: "4000", asset: "USD", id }), /reserved/, "an id is used once");
+  clock.now = Date.UTC(2026, 10, 3) / 1000;
+  assert.deepEqual(p.collect().collected, [id]);
+  clock.now = Date.UTC(2026, 11, 2) / 1000;
+  const closed = p.closePeriod("2026-11");
+  assert.ok(closed, "the AP2 share's line is in the batch for the month it was collected");
+  assert.ok(p.receipt(id)?.line.includes(id), "the owner fetches the receipt with the id from the Payment Receipt");
+});
+
+test("AP2 evaluation: every skip reason, each still a pass", () => {
+  const { p } = setup("keep");
+  const ev = (constraint: unknown, payment = usd(4000), owner = "owner-3") => p.evaluateAp2({ self: HOLDER, owner, constraint, iat: IAT, payment });
+  const seen: string[] = [];
+  const reason = (r: ReturnType<typeof ev>) => {
+    const why = r.pass === true && r.receipt?.status === "skipped" ? r.receipt.reason : r.receipt?.status;
+    if (r.receipt?.status === "skipped") seen.push(r.receipt.reason);
+    return why;
+  };
+  assert.equal(reason(ev(ap2Constraint({ rate: "0.02" }))), "bad-policy");
+  assert.equal(reason(ev(ap2Constraint({ cap: { amount: 0, currency: "USD" } }))), "bad-policy");
+  assert.equal(reason(ev(ap2Constraint({ extra: 1 }))), "bad-policy");
+  assert.equal(reason(ev(ap2Constraint({ logs: ["https://other.example/solidarity"] }))), "wrong-log");
+  assert.equal(reason(ev(ap2Constraint({ fund: "https://elsewhere.example/fund" }))), "fund-not-allowed");
+  assert.equal(reason(ev(ap2Constraint(), { amount: 4000, currency: "EUR" })), "purchase-not-supported");
+  assert.equal(reason(ev(ap2Constraint(), usd(99))), "below-minimum", "1% of 99 cents floors to zero");
+  const small = ap2Constraint({ cap: { amount: 50, currency: "USD" } });
+  const first = ev(small, usd(4000), "owner-4");
+  assert.equal(first.receipt?.status, "pending");
+  p.recordPurchase({ owner: "owner-4", purchaseId: "c1", amount: "5000", asset: "USD", id: (first.receipt as { id: string }).id });
+  assert.equal(reason(ev(small, usd(4000), "owner-4")), "cap-reached");
+  assert.deepEqual([...new Set(seen)].sort(), [...S.AP2_SKIP_REASONS].sort(), "every reason exercised");
+  assert.deepEqual([...S.ap2ReceiptSchema.properties.reason.enum], [...S.AP2_SKIP_REASONS], "the receipt schema lists exactly these");
+});
+
+test("AP2 evaluation never fails a payment, whatever it is handed", () => {
+  const { p } = setup("keep");
+  const junk: unknown[] = [null, undefined, 0, "x", [], {}, { holder: HOLDER }, { ...ap2Constraint(), cap: "100" }, { ...ap2Constraint(), logs: "nope" }, { ...ap2Constraint(), type: "solidarity" }, JSON.parse('{"__proto__":{"holder":"https://processor.example"}}')];
+  for (const constraint of junk) {
+    for (const payment of [usd(4000), { amount: -1, currency: "USD" }, { amount: 1.5, currency: "USD" }, { amount: Number.NaN, currency: "USD" }]) {
+      const r = p.evaluateAp2({ self: HOLDER, owner: "owner-5", constraint, iat: IAT, payment });
+      assert.equal(r.pass, true, JSON.stringify(constraint));
+      if (r.receipt) assert.deepEqual(S.validateSchema(S.ap2ReceiptSchema, r.receipt), [], JSON.stringify(r.receipt));
+    }
+  }
+});
+
+test("AP2: a new open Payment Mandate keeps what the owner already committed this month", () => {
+  const { p } = setup("keep");
+  const a = ap2Constraint({ cap: { amount: 60, currency: "USD" } });
+  const r1 = p.evaluateAp2({ self: HOLDER, owner: "owner-6", constraint: a, iat: IAT, payment: usd(5000) });
+  p.recordPurchase({ owner: "owner-6", purchaseId: "m1", amount: "5000", asset: "USD", id: (r1.receipt as { id: string }).id });
+  const b = ap2Constraint({ cap: { amount: 60, currency: "USD" }, rate: "0.005" });
+  const r2 = p.evaluateAp2({ self: HOLDER, owner: "owner-6", constraint: b, iat: IAT + 86400, payment: usd(5000) });
+  const id2 = (r2.receipt as { id: string }).id;
+  assert.equal(p.recordPurchase({ owner: "owner-6", purchaseId: "m2", amount: "5000", asset: "USD", id: id2 }), id2);
+  assert.equal(p.shareAmount(id2), 10n, "25 cents at the new rate, but only 10 left under the 60 cent cap after the first 50");
+});

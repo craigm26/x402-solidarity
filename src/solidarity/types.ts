@@ -13,6 +13,32 @@
 /** Extension key in `extensions`. */
 export const SOLIDARITY = "solidarity";
 
+/**
+ * `type` of the AP2 Payment Mandate Constraint
+ * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Payment Mandate Constraint").
+ * AP2 recommends a collision-resistant name for a new constraint type, such as
+ * a reverse-DNS prefix the specifier controls.
+ */
+export const AP2_CONSTRAINT_TYPE = "com.craigmerry.solidarity";
+
+/** Why the holder applies no share, in its AP2 Payment Receipt. */
+export const AP2_SKIP_REASONS = ["bad-policy", "wrong-log", "fund-not-allowed", "purchase-not-supported", "below-minimum", "cap-reached"] as const;
+export type Ap2SkipReason = (typeof AP2_SKIP_REASONS)[number];
+
+/** The owner policy as an AP2 constraint. `cap` is an AP2 Amount: integer minor units of an ISO 4217 code. */
+export interface Ap2SolidarityConstraint {
+  type: typeof AP2_CONSTRAINT_TYPE;
+  holder: string;
+  rate: string;
+  cap: { amount: number; currency: string };
+  fund: string;
+  logs: string[];
+  refunds?: "keep" | "net";
+}
+
+/** The `solidarity` property the holder adds to its signed AP2 Payment Receipt. */
+export type Ap2ReceiptOutcome = { status: "pending"; id: string; log: string } | { status: "skipped"; reason: Ap2SkipReason; log: string };
+
 /** Wire and statement version. */
 export const SOLIDARITY_VERSION = 2;
 

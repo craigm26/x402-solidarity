@@ -160,4 +160,17 @@ export class CapCounter {
   get(id: string): Readonly<Commitment> | undefined {
     return this.byId.get(id);
   }
+
+  /**
+   * The same owner's counter under a new policy (for example a new AP2 open
+   * Payment Mandate): what was already committed keeps counting against the
+   * new cap, so changing the policy mid-month never makes room.
+   */
+  withPolicy(policy: OwnerPolicy): CapCounter {
+    const next = new CapCounter(policy);
+    for (const [id, c] of this.byId) next.byId.set(id, { ...c });
+    for (const [period, total] of this.totals) next.totals.set(period, total);
+    next.off = this.off;
+    return next;
+  }
 }

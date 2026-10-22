@@ -539,6 +539,46 @@ function shareVectors() {
   };
 }
 
+/**
+ * AP2 constraint evaluation (processor-mode.md, "AP2: a Payment Mandate Constraint"), run in order by
+ * one holder. Every case passes; `want` is the holder's receipt property without its random id,
+ * written by hand, and the generator fails if the holder disagrees.
+ */
+function ap2Vectors() {
+  const FUND = "https://fund.example/solidarity";
+  const HOLDER = "https://processor.example";
+  const descriptor: LogDescriptor = { version: 2, log: `${HOLDER}/solidarity`, funds: [FUND], keys: [{ kid: "did:web:processor.example#1", from: "2026-10", until: null }] };
+  const clock = Date.UTC(2026, 9, 10) / 1000;
+  const holder = new S.ProcessorHolder({ descriptor, key: S.generateSigningKey("EdDSA", descriptor.keys[0].kid), clock: () => clock });
+  const iat = Date.UTC(2026, 9, 1) / 1000;
+  const base = S.processorConstraint({ version: 2, rate: "0.01", cap: { amount: "50", asset: "USD" }, fund: FUND, logs: [descriptor.log], refunds: "keep", since: "2026-10-01T00:00:00Z" }, { holder: HOLDER });
+  const usd = (amount: number) => ({ amount, currency: "USD" });
+  type Want = { pass: true; receipt?: { status: string; reason?: string } };
+  const cases: Array<{ name: string; self: string; owner: string; constraint: unknown; payment: { amount: number; currency: string }; want: Want; record?: string }> = [
+    { name: "not-the-holder", self: "https://network.example", owner: "a", constraint: base, payment: usd(4000), want: { pass: true } },
+    { name: "pending", self: HOLDER, owner: "a", constraint: base, payment: usd(5000), want: { pass: true, receipt: { status: "pending" } }, record: "5000" },
+    { name: "cap-reached", self: HOLDER, owner: "a", constraint: base, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "cap-reached" } } },
+    { name: "bad-policy-rate", self: HOLDER, owner: "b", constraint: { ...base, rate: "0.02" }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "bad-policy" } } },
+    { name: "bad-policy-cap-string", self: HOLDER, owner: "b", constraint: { ...base, cap: { amount: "50", currency: "USD" } }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "bad-policy" } } },
+    { name: "wrong-log", self: HOLDER, owner: "b", constraint: { ...base, logs: ["https://other.example/solidarity"] }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "wrong-log" } } },
+    { name: "fund-not-allowed", self: HOLDER, owner: "b", constraint: { ...base, fund: "https://elsewhere.example/fund" }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "fund-not-allowed" } } },
+    { name: "purchase-not-supported", self: HOLDER, owner: "b", constraint: base, payment: { amount: 4000, currency: "EUR" }, want: { pass: true, receipt: { status: "skipped", reason: "purchase-not-supported" } } },
+    { name: "below-minimum", self: HOLDER, owner: "b", constraint: base, payment: usd(99), want: { pass: true, receipt: { status: "skipped", reason: "below-minimum" } } },
+  ];
+  for (const c of cases) {
+    const got = holder.evaluateAp2({ self: c.self, owner: c.owner, constraint: c.constraint, iat, payment: c.payment });
+    const shown = got.receipt ? { pass: got.pass, receipt: got.receipt.status === "skipped" ? { status: "skipped", reason: got.receipt.reason } : { status: got.receipt.status } } : { pass: got.pass };
+    if (JSON.stringify(shown) !== JSON.stringify(c.want)) throw new Error(`ap2 case ${c.name}: holder says ${JSON.stringify(shown)}, want ${JSON.stringify(c.want)}`);
+    if (c.record && got.receipt?.status === "pending") holder.recordPurchase({ owner: c.owner, purchaseId: c.name, amount: c.record, asset: "USD", id: got.receipt.id });
+  }
+  return {
+    note: "One holder (https://processor.example) evaluates these in order, at 2026-10-10. Every case passes; the receipt property's id is random and left out. `record` means the purchase then became final and its line was recorded under the promised id.",
+    descriptor,
+    iat,
+    cases: cases.map(({ name, self, owner, constraint, payment, want, record }) => ({ name, self, owner, constraint, payment, want, ...(record ? { record } : {}) })),
+  };
+}
+
 function policyVectors() {
   const p = (name: string, mode: "separate" | "processor", policy: unknown) => {
     const problems = S.policyProblems(policy as OwnerPolicy, mode);
@@ -570,6 +610,7 @@ export async function generate(): Promise<Record<string, string>> {
   files["merkle-rfc6962.json"] = json(merkleVectors());
   files["shares.json"] = json(shareVectors());
   files["policies.json"] = json(policyVectors());
+  files["ap2.json"] = json(ap2Vectors());
   files["payloads.json"] = json({
     note: "Facilitator cases. Process them in order with ONE log (state carries over: ids seen, channel cumulative amounts). The log's clock is `now`. Before the cases, the owner's channel exists with the given deposit, and the mints and deposits in `setup` have been made. `want` is the outcome each case must have, written by hand; `expected` is the full SettleResponse.extensions.solidarity.info the log returns (null = no entry). Every core SettleResponse field must come back unchanged. Purchase payloads are placeholders: the log does not check them.",
     now: NOW,
