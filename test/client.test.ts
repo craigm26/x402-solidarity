@@ -171,17 +171,25 @@ test("exactly one policy holder: no share under a mandate whose holder is someon
   const c = ctx();
   const d = await S.buildShare(c, { declared, accepted: req("48000000"), mandateHolder: "https://processor.example", self: "agent-1" });
   assert.equal(d.attached, false);
-  assert.equal(S.mayAttachShare([{ type: S.AP2_CONSTRAINT_TYPE, holder: "https://processor.example" }], "agent-1"), false);
-  assert.equal(S.mayAttachShare([{ type: S.AP2_CONSTRAINT_TYPE, holder: "agent-1" }], "agent-1"), true);
-  assert.equal(S.mayAttachShare([{ type: "payment.budget" }], "agent-1"), true, "other constraints don't name a holder");
+  assert.equal(S.mayAttachShare([{ vct: S.AP2_MANDATE_VCT, holder: "https://processor.example" }], "agent-1"), false);
+  assert.equal(S.mayAttachShare([{ vct: S.AP2_MANDATE_VCT, holder: "agent-1" }], "agent-1"), true);
+  assert.equal(S.mayAttachShare([{ vct: "mandate.payment.open.1" }], "agent-1"), true, "other mandates don't name a holder");
   assert.equal(S.mayAttachShare([], "agent-1"), true);
 });
 
-test("processor mode fields: the mandate constraint carries the policy", () => {
-  const c = S.processorConstraint({ ...POLICY, cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity", refunds: "net" }, { holder: "https://processor.example", logs: ["https://processor.example/solidarity"] });
-  assert.deepEqual(c, { type: "com.craigmerry.solidarity", holder: "https://processor.example", rate: "0.001", cap: { amount: 500, currency: "USD" }, fund: "https://fund.example/solidarity", logs: ["https://processor.example/solidarity"], refunds: "net" });
-  assert.deepEqual(conformance("policies.json").processorConstraint.cap, { amount: 500, currency: "USD" }, "an AP2 Amount: integer minor units of USD");
-  assert.throws(() => S.processorConstraint({ ...POLICY, logs: undefined }, { holder: "h" }), /logs/);
+test("processor mode fields: the Solidarity Mandate carries the policy", () => {
+  const iat = Date.UTC(2026, 9, 21, 9, 12) / 1000;
+  const m = S.solidarityMandate({ ...POLICY, cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity", refunds: "net" }, { holder: "https://processor.example", iat, logs: ["https://processor.example/solidarity"] });
+  assert.deepEqual(m, { vct: "com.craigmerry.solidarity.1", holder: "https://processor.example", rate: "0.001", cap: { amount: 500, currency: "USD" }, fund: "https://fund.example/solidarity", logs: ["https://processor.example/solidarity"], refunds: "net", iat });
+  assert.deepEqual(S.validateSchema(S.ap2MandateSchema, m), []);
+  assert.equal(S.mandatePolicy(m).since, "2026-10-21T09:12:00Z");
+  assert.deepEqual(conformance("policies.json").solidarityMandate.cap, { amount: 500, currency: "USD" }, "an AP2 Amount: integer minor units of USD");
+  const opts = { holder: "https://processor.example", iat };
+  assert.throws(() => S.solidarityMandate({ ...POLICY, logs: undefined }, opts), /logs/);
+  assert.throws(() => S.solidarityMandate({ ...POLICY, cap: { amount: "500", asset: "usd" } }, opts), /ISO 4217/);
+  assert.throws(() => S.solidarityMandate({ ...POLICY, cap: { amount: "9007199254740993", asset: "USD" } }, opts), /safe integer/);
+  assert.throws(() => S.solidarityMandate({ ...POLICY, cap: { amount: "500", asset: "USD" } }, { ...opts, holder: "https://Processor.example" }), /lowercase/);
+  assert.throws(() => S.solidarityMandate({ ...POLICY, cap: { amount: "500", asset: "USD" } }, { ...opts, exp: iat }), /exp after iat/);
 });
 
 test("declaration helper rejects malformed or duplicate logs entries", () => {

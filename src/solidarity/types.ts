@@ -14,30 +14,37 @@
 export const SOLIDARITY = "solidarity";
 
 /**
- * `type` of the AP2 Payment Mandate Constraint
- * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Payment Mandate Constraint").
- * AP2 recommends a collision-resistant name for a new constraint type, such as
- * a reverse-DNS prefix the specifier controls.
+ * `vct` of the AP2 Solidarity Mandate
+ * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Solidarity Mandate").
+ * AP2 lets specifiers define new mandate types and recommends a
+ * collision-resistant name, such as a reverse-DNS prefix the specifier
+ * controls; the suffix follows AP2's mandate versioning.
  */
-export const AP2_CONSTRAINT_TYPE = "com.craigmerry.solidarity";
+export const AP2_MANDATE_VCT = "com.craigmerry.solidarity.1";
 
-/** Why the holder applies no share, in its AP2 Payment Receipt. */
-export const AP2_SKIP_REASONS = ["bad-policy", "wrong-log", "fund-not-allowed", "purchase-not-supported", "below-minimum", "cap-reached"] as const;
-export type Ap2SkipReason = (typeof AP2_SKIP_REASONS)[number];
+/** Why the holder does not enroll a Solidarity Mandate, in its Mandate Receipt. */
+export const AP2_REFUSAL_REASONS = ["bad-policy", "wrong-log", "fund-not-allowed", "superseded"] as const;
+export type Ap2RefusalReason = (typeof AP2_REFUSAL_REASONS)[number];
 
-/** The owner policy as an AP2 constraint. `cap` is an AP2 Amount: integer minor units of an ISO 4217 code. */
-export interface Ap2SolidarityConstraint {
-  type: typeof AP2_CONSTRAINT_TYPE;
+/**
+ * The Solidarity Mandate's content: the owner policy in AP2's shapes. `cap` is
+ * an AP2 Amount (integer minor units of an ISO 4217 code); `iat` stands in for
+ * the policy's `since`, and the policy ends at `exp` if there is one.
+ */
+export interface Ap2SolidarityMandate {
+  vct: typeof AP2_MANDATE_VCT;
   holder: string;
   rate: string;
   cap: { amount: number; currency: string };
   fund: string;
   logs: string[];
   refunds?: "keep" | "net";
+  iat: number;
+  exp?: number;
 }
 
-/** The `solidarity` property the holder adds to its signed AP2 Payment Receipt. */
-export type Ap2ReceiptOutcome = { status: "pending"; id: string; log: string } | { status: "skipped"; reason: Ap2SkipReason; log: string };
+/** The `solidarity` property the holder adds to its signed Mandate Receipt. */
+export type Ap2EnrollmentOutcome = { status: "enrolled"; log: string } | { status: "refused"; reason: Ap2RefusalReason; log: string };
 
 /** Wire and statement version. */
 export const SOLIDARITY_VERSION = 2;

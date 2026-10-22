@@ -213,8 +213,8 @@
       ]
     }
   ],
-  "processorConstraint": {
-    "type": "com.craigmerry.solidarity",
+  "solidarityMandate": {
+    "vct": "com.craigmerry.solidarity.1",
     "holder": "https://processor.example",
     "rate": "0.001",
     "cap": {
@@ -225,6 +225,7 @@
     "logs": [
       "https://processor.example/solidarity"
     ],
-    "refunds": "keep"
+    "refunds": "keep",
+    "iat": 1792573920
   }
 }

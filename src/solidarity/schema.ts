@@ -85,19 +85,19 @@ export const solidarityOutcomeSchema = {
 } as const;
 
 /**
- * Schemas of the AP2 Payment Mandate Constraint and of the `solidarity`
- * property the holder adds to its Payment Receipt, copied from
- * https://craigmerry.com/solidarity-levy/spec/processor-mode.md ("AP2: a Payment Mandate Constraint").
- * The whole constraint is one selectively disclosable element of the open
- * Payment Mandate's `constraints` array; no field inside it is disclosable on
- * its own.
+ * Schemas of the AP2 Solidarity Mandate's content and of the `solidarity`
+ * property the holder adds to its Mandate Receipt, copied from
+ * https://craigmerry.com/solidarity-levy/spec/processor-mode.md ("AP2: a Solidarity Mandate").
+ * Other SD-JWT VC claims may appear in the mandate, so the content schema
+ * leaves additional properties open. None of its claims is selectively
+ * disclosable: the agent presents the whole mandate, to the holder only.
  */
-export const ap2ConstraintSchema = {
+export const ap2MandateSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   properties: {
-    type: { const: "com.craigmerry.solidarity" },
-    holder: { type: "string", pattern: "^https://[^/?#\\s]+$" },
+    vct: { const: "com.craigmerry.solidarity.1" },
+    holder: { type: "string", pattern: "^https://[^/?#\\sA-Z]+$" },
     rate: { type: "string", pattern: "^0\\.(01|00[0-9]{0,3}[1-9])$" },
     cap: {
       type: "object",
@@ -108,24 +108,24 @@ export const ap2ConstraintSchema = {
     fund: { type: "string", pattern: "^\\S{1,256}$" },
     logs: { type: "array", items: { type: "string", pattern: "^https://" } },
     refunds: { enum: ["keep", "net"] },
+    iat: { type: "integer" },
+    exp: { type: "integer" },
   },
-  required: ["type", "holder", "rate", "cap", "fund", "logs"],
-  additionalProperties: false,
+  required: ["vct", "holder", "rate", "cap", "fund", "logs", "iat"],
 } as const;
 
-export const ap2ReceiptSchema = {
+export const ap2EnrollmentSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   properties: {
-    status: { enum: ["pending", "skipped"] },
-    reason: { enum: ["bad-policy", "wrong-log", "fund-not-allowed", "purchase-not-supported", "below-minimum", "cap-reached"] },
-    id: { type: "string", pattern: "^[A-Za-z0-9_-]{22,128}$" },
+    status: { enum: ["enrolled", "refused"] },
+    reason: { enum: ["bad-policy", "wrong-log", "fund-not-allowed", "superseded"] },
     log: { type: "string", pattern: "^https://" },
   },
   required: ["status", "log"],
   oneOf: [
-    { properties: { status: { const: "pending" }, reason: false }, required: ["id"] },
-    { properties: { status: { const: "skipped" }, id: false }, required: ["reason"] },
+    { properties: { status: { const: "enrolled" }, reason: false } },
+    { properties: { status: { const: "refused" } }, required: ["reason"] },
   ],
   additionalProperties: false,
 } as const;

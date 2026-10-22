@@ -540,42 +540,54 @@ function shareVectors() {
 }
 
 /**
- * AP2 constraint evaluation (processor-mode.md, "AP2: a Payment Mandate Constraint"), run in order by
- * one holder. Every case passes; `want` is the holder's receipt property without its random id,
- * written by hand, and the generator fails if the holder disagrees.
+ * AP2 Solidarity Mandates (processor-mode.md, "AP2: a Solidarity Mandate"), presented in order to one
+ * holder at 2026-10-10. `want` is the `solidarity` property of the holder's Mandate Receipt (or none),
+ * written by hand; the generator fails if the holder disagrees. `purchase` cases then finalize a
+ * payment for the owner and give the share the holder records under the policy in force.
  */
 function ap2Vectors() {
   const FUND = "https://fund.example/solidarity";
   const HOLDER = "https://processor.example";
   const descriptor: LogDescriptor = { version: 2, log: `${HOLDER}/solidarity`, funds: [FUND], keys: [{ kid: "did:web:processor.example#1", from: "2026-10", until: null }] };
-  const clock = Date.UTC(2026, 9, 10) / 1000;
-  const holder = new S.ProcessorHolder({ descriptor, key: S.generateSigningKey("EdDSA", descriptor.keys[0].kid), clock: () => clock });
+  const now = Date.UTC(2026, 9, 10) / 1000;
+  const holder = new S.ProcessorHolder({ descriptor, key: S.generateSigningKey("EdDSA", descriptor.keys[0].kid), clock: () => now });
   const iat = Date.UTC(2026, 9, 1) / 1000;
-  const base = S.processorConstraint({ version: 2, rate: "0.01", cap: { amount: "50", asset: "USD" }, fund: FUND, logs: [descriptor.log], refunds: "keep", since: "2026-10-01T00:00:00Z" }, { holder: HOLDER });
-  const usd = (amount: number) => ({ amount, currency: "USD" });
-  type Want = { pass: true; receipt?: { status: string; reason?: string } };
-  const cases: Array<{ name: string; self: string; owner: string; constraint: unknown; payment: { amount: number; currency: string }; want: Want; record?: string }> = [
-    { name: "not-the-holder", self: "https://network.example", owner: "a", constraint: base, payment: usd(4000), want: { pass: true } },
-    { name: "pending", self: HOLDER, owner: "a", constraint: base, payment: usd(5000), want: { pass: true, receipt: { status: "pending" } }, record: "5000" },
-    { name: "cap-reached", self: HOLDER, owner: "a", constraint: base, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "cap-reached" } } },
-    { name: "bad-policy-rate", self: HOLDER, owner: "b", constraint: { ...base, rate: "0.02" }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "bad-policy" } } },
-    { name: "bad-policy-cap-string", self: HOLDER, owner: "b", constraint: { ...base, cap: { amount: "50", currency: "USD" } }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "bad-policy" } } },
-    { name: "wrong-log", self: HOLDER, owner: "b", constraint: { ...base, logs: ["https://other.example/solidarity"] }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "wrong-log" } } },
-    { name: "fund-not-allowed", self: HOLDER, owner: "b", constraint: { ...base, fund: "https://elsewhere.example/fund" }, payment: usd(4000), want: { pass: true, receipt: { status: "skipped", reason: "fund-not-allowed" } } },
-    { name: "purchase-not-supported", self: HOLDER, owner: "b", constraint: base, payment: { amount: 4000, currency: "EUR" }, want: { pass: true, receipt: { status: "skipped", reason: "purchase-not-supported" } } },
-    { name: "below-minimum", self: HOLDER, owner: "b", constraint: base, payment: usd(99), want: { pass: true, receipt: { status: "skipped", reason: "below-minimum" } } },
+  const base = S.solidarityMandate({ version: 2, rate: "0.01", cap: { amount: "50", asset: "USD" }, fund: FUND, logs: [descriptor.log], refunds: "keep", since: "2026-10-01T00:00:00Z" }, { holder: HOLDER, iat });
+  const enrolled = { status: "enrolled", log: descriptor.log };
+  const refused = (reason: string) => ({ status: "refused", reason, log: descriptor.log });
+  type Step =
+    | { name: string; self: string; owner: string; mandate: unknown; want: unknown }
+    | { name: string; owner: string; purchase: { amount: string; asset: string }; share: string | null };
+  const steps: Step[] = [
+    { name: "not-the-holder", self: "https://network.example", owner: "a", mandate: base, want: null },
+    { name: "enrolled", self: HOLDER, owner: "a", mandate: base, want: enrolled },
+    { name: "purchase-1", owner: "a", purchase: { amount: "4000", asset: "USD" }, share: "40" },
+    { name: "purchase-2-capped", owner: "a", purchase: { amount: "4000", asset: "USD" }, share: "10" },
+    { name: "purchase-3-cap-reached", owner: "a", purchase: { amount: "4000", asset: "USD" }, share: null },
+    { name: "purchase-other-currency", owner: "a", purchase: { amount: "4000", asset: "EUR" }, share: null },
+    { name: "superseded-older", self: HOLDER, owner: "a", mandate: { ...base, iat: iat - 60 }, want: refused("superseded") },
+    { name: "newer-replaces", self: HOLDER, owner: "a", mandate: { ...base, iat: iat + 60, cap: { amount: 80, currency: "USD" } }, want: enrolled },
+    { name: "purchase-4-after-replace", owner: "a", purchase: { amount: "4000", asset: "USD" }, share: "30" },
+    { name: "bad-policy-rate", self: HOLDER, owner: "b", mandate: { ...base, rate: "0.02" }, want: refused("bad-policy") },
+    { name: "bad-policy-no-iat", self: HOLDER, owner: "b", mandate: { ...base, iat: undefined }, want: refused("bad-policy") },
+    { name: "bad-policy-expired", self: HOLDER, owner: "b", mandate: { ...base, exp: iat + 3600 }, want: refused("bad-policy") },
+    { name: "wrong-log", self: HOLDER, owner: "b", mandate: { ...base, logs: ["https://other.example/solidarity"] }, want: refused("wrong-log") },
+    { name: "fund-not-allowed", self: HOLDER, owner: "b", mandate: { ...base, fund: "https://elsewhere.example/fund" }, want: refused("fund-not-allowed") },
   ];
-  for (const c of cases) {
-    const got = holder.evaluateAp2({ self: c.self, owner: c.owner, constraint: c.constraint, iat, payment: c.payment });
-    const shown = got.receipt ? { pass: got.pass, receipt: got.receipt.status === "skipped" ? { status: "skipped", reason: got.receipt.reason } : { status: got.receipt.status } } : { pass: got.pass };
-    if (JSON.stringify(shown) !== JSON.stringify(c.want)) throw new Error(`ap2 case ${c.name}: holder says ${JSON.stringify(shown)}, want ${JSON.stringify(c.want)}`);
-    if (c.record && got.receipt?.status === "pending") holder.recordPurchase({ owner: c.owner, purchaseId: c.name, amount: c.record, asset: "USD", id: got.receipt.id });
+  for (const st of steps) {
+    if ("mandate" in st) {
+      const got = holder.enrollAp2({ self: st.self, owner: st.owner, mandate: st.mandate }).receipt ?? null;
+      if (JSON.stringify(got) !== JSON.stringify(st.want)) throw new Error(`ap2 step ${st.name}: holder says ${JSON.stringify(got)}, want ${JSON.stringify(st.want)}`);
+    } else {
+      const id = holder.recordPurchase({ owner: st.owner, purchaseId: st.name, amount: st.purchase.amount, asset: st.purchase.asset });
+      const got = id === undefined ? null : String(holder.shareAmount(id));
+      if (got !== st.share) throw new Error(`ap2 step ${st.name}: holder recorded ${got}, want ${st.share}`);
+    }
   }
   return {
-    note: "One holder (https://processor.example) evaluates these in order, at 2026-10-10. Every case passes; the receipt property's id is random and left out. `record` means the purchase then became final and its line was recorded under the promised id.",
+    note: "One holder (https://processor.example) takes these steps in order, at 2026-10-10. Mandate steps give the `solidarity` property of its Mandate Receipt (null: not the holder, nothing done). Purchase steps finalize a payment and give the share recorded, in minor units (null: none).",
     descriptor,
-    iat,
-    cases: cases.map(({ name, self, owner, constraint, payment, want, record }) => ({ name, self, owner, constraint, payment, want, ...(record ? { record } : {}) })),
+    steps: steps.map((st) => JSON.parse(JSON.stringify(st))),
   };
 }
 
@@ -598,7 +610,7 @@ function policyVectors() {
       p("logs-not-https", "separate", { ...POLICY, logs: ["http://log.example/solidarity"] }),
       p("version-1", "separate", { ...POLICY, version: 1 }),
     ],
-    processorConstraint: S.processorConstraint({ ...POLICY, cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity" }, { holder: "https://processor.example", logs: ["https://processor.example/solidarity"] }),
+    solidarityMandate: S.solidarityMandate({ ...POLICY, cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity" }, { holder: "https://processor.example", iat: Date.UTC(2026, 9, 21, 9, 12) / 1000, logs: ["https://processor.example/solidarity"] }),
   };
 }
 

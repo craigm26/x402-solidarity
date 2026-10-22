@@ -60,9 +60,9 @@ export type {
   LogEntry,
   Mode,
   OwnerPolicy,
-  Ap2SolidarityConstraint,
-  Ap2ReceiptOutcome,
-  Ap2SkipReason,
+  Ap2SolidarityMandate,
+  Ap2EnrollmentOutcome,
+  Ap2RefusalReason,
   PaymentPayload,
   PaymentRequirements,
   PublicJwk,
@@ -83,8 +83,8 @@ export type {
 
 export {
   SOLIDARITY,
-  AP2_CONSTRAINT_TYPE,
-  AP2_SKIP_REASONS,
+  AP2_MANDATE_VCT,
+  AP2_REFUSAL_REASONS,
   SOLIDARITY_VERSION,
   LINE_PREFIX,
   RATE_PATTERN,
@@ -97,7 +97,7 @@ export {
 
 export { USDC_BASE_SEPOLIA, BASE_SEPOLIA, BATCH_SETTLEMENT_ADDRESS, BATCH_SETTLEMENT_DOMAIN } from "./constants.ts";
 
-export { solidaritySchema, solidarityOutcomeSchema, ap2ConstraintSchema, ap2ReceiptSchema, validateSchema } from "./schema.ts";
+export { solidaritySchema, solidarityOutcomeSchema, ap2MandateSchema, ap2EnrollmentSchema, validateSchema } from "./schema.ts";
 
 export { canonicalize, canonicalizeStrict, canonicalBytes, isCanonical } from "./jcs.ts";
 
@@ -133,8 +133,8 @@ export {
   openClientChannel,
   applyOutcomeToChannel,
   resyncChannel,
-  processorConstraint,
-  constraintPolicy,
+  solidarityMandate,
+  mandatePolicy,
   mayAttachShare,
 } from "./client.ts";
 

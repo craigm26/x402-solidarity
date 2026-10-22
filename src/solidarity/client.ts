@@ -6,8 +6,8 @@
  * purchase payment ("Advertisement", "`PaymentRequired` and `PaymentPayload`").
  *
  * Processor mode puts nothing on the x402 wire. The only client-side pieces
- * are the mandate constraint that carries the policy to a processor and the
- * rule that a client acting under such a mandate adds no share of its own.
+ * are the AP2 Solidarity Mandate that carries the policy to a processor and
+ * the rule that a client adds no share to a payment that processor applies one to.
  */
 
 import { getAddress } from "viem";
@@ -25,8 +25,8 @@ import type {
   SolidarityInfo,
   SolidarityOutcome,
 } from "./types.ts";
-import { AP2_CONSTRAINT_TYPE, SOLIDARITY, SOLIDARITY_VERSION } from "./types.ts";
-import type { Ap2SolidarityConstraint } from "./types.ts";
+import { AP2_MANDATE_VCT, SOLIDARITY, SOLIDARITY_VERSION } from "./types.ts";
+import type { Ap2SolidarityMandate } from "./types.ts";
 import { solidaritySchema } from "./schema.ts";
 import type { ChannelConfig, Hex, TypedDataSigner } from "./evm.ts";
 import { computeChannelId, signEip3009, signVoucher, verifyVoucherSignature } from "./evm.ts";
@@ -367,53 +367,57 @@ export function readOutcome(settleResponse: { extensions?: Record<string, unknow
 // ---- processor mode: fields only ---------------------------------------------
 
 /**
- * The AP2 Payment Mandate Constraint that carries a processor-mode policy
- * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Payment Mandate Constraint",
- * informative): `type`, `holder` (the one party that applies the share) and
- * the policy's `rate`, `cap`, `fund`, `logs` and `refunds`. `cap` becomes an
- * AP2 Amount, an integer in minor units of an ISO 4217 code. The open Payment
- * Mandate's `iat` stands in for the policy's `since`, so neither it nor
- * `version` is carried.
+ * The content of an AP2 Solidarity Mandate for a processor-mode policy
+ * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Solidarity Mandate",
+ * informative): `vct`, `holder` (the one party that applies the share) and the
+ * policy's `rate`, `cap`, `fund`, `logs` and `refunds`. `cap` becomes an AP2
+ * Amount, an integer in minor units of an ISO 4217 code. `iat` stands in for
+ * the policy's `since`; `exp`, if given, ends the policy.
  */
-export function processorConstraint(policy: OwnerPolicy, opts: { holder: string; logs?: string[] }): Ap2SolidarityConstraint {
+export function solidarityMandate(policy: OwnerPolicy, opts: { holder: string; iat: number; exp?: number; logs?: string[] }): Ap2SolidarityMandate {
   assertPolicy(policy, "processor");
   const logs = opts.logs ?? policy.logs;
-  if (!logs || logs.length === 0) throw new Error("the constraint names the holder's log in logs");
-  if (!/^[A-Z]{3}$/.test(policy.cap.asset)) throw new Error("an AP2 constraint's cap is in an ISO 4217 currency code");
+  if (!logs || logs.length === 0) throw new Error("the mandate names the holder's log in logs");
+  if (!/^https:\/\/[^/?#\sA-Z]+$/.test(opts.holder)) throw new Error("holder is a lowercase https origin");
+  if (!/^[A-Z]{3}$/.test(policy.cap.asset)) throw new Error("an AP2 mandate's cap is in an ISO 4217 currency code");
   const amount = Number(policy.cap.amount);
   if (!Number.isSafeInteger(amount)) throw new Error("cap.amount does not fit an AP2 Amount (a safe integer)");
+  if (!Number.isSafeInteger(opts.iat) || (opts.exp !== undefined && (!Number.isSafeInteger(opts.exp) || opts.exp <= opts.iat))) throw new Error("iat and exp are Unix seconds, exp after iat");
   return {
-    type: AP2_CONSTRAINT_TYPE,
+    vct: AP2_MANDATE_VCT,
     holder: opts.holder,
     rate: policy.rate,
     cap: { amount, currency: policy.cap.asset },
     fund: policy.fund,
     logs: [...logs],
     refunds: policy.refunds ?? "keep",
+    iat: opts.iat,
+    ...(opts.exp !== undefined ? { exp: opts.exp } : {}),
   };
 }
 
-/** The owner policy an AP2 constraint carries, with `since` from the open Payment Mandate's `iat`. */
-export function constraintPolicy(c: Ap2SolidarityConstraint, iat: number): OwnerPolicy {
+/** The owner policy a Solidarity Mandate carries, with `since` from its `iat`. The caller checks `iat` first. */
+export function mandatePolicy(m: Ap2SolidarityMandate): OwnerPolicy {
   return {
     version: 2,
-    rate: c.rate,
-    cap: { amount: String(c.cap.amount), asset: c.cap.currency },
-    fund: c.fund,
-    logs: [...c.logs],
-    refunds: c.refunds ?? "keep",
-    since: new Date(iat * 1000).toISOString().replace(/\.000Z$/, "Z"),
+    rate: m.rate,
+    cap: { amount: String(m.cap.amount), asset: m.cap.currency },
+    fund: m.fund,
+    logs: [...m.logs],
+    refunds: m.refunds ?? "keep",
+    since: new Date(m.iat * 1000).toISOString().replace(/\.000Z$/, "Z"),
   };
 }
 
 /**
- * "Exactly one policy holder applies a share to any purchase." A client acting
- * under a mandate whose solidarity constraint names another holder must not
- * add `extensions.solidarity`.
+ * "Exactly one policy holder applies a share to any purchase." A client must
+ * not add `extensions.solidarity` to a payment whose credential the holder of
+ * the owner's Solidarity Mandate provides; pass that mandate (or any list of
+ * mandates that includes it) and the client's own identity.
  */
-export function mayAttachShare(mandateConstraints: Array<{ type?: string; holder?: string }> | undefined, self: string): boolean {
-  const c = mandateConstraints?.find((x) => x?.type === AP2_CONSTRAINT_TYPE);
-  return !c || c.holder === self;
+export function mayAttachShare(mandates: Array<{ vct?: string; holder?: string }> | undefined, self: string): boolean {
+  const m = mandates?.find((x) => x?.vct === AP2_MANDATE_VCT);
+  return !m || m.holder === self;
 }
 
 /** Checksummed form of the account part of a CAIP-10 fund (for display). */

@@ -16,11 +16,10 @@ import { LogBook } from "./book.ts";
 import type { ProofResult } from "./book.ts";
 import type { SigningKey } from "./ledger.ts";
 import { formatLine, formatSettlement } from "./ledger.ts";
-import { constraintPolicy } from "./client.ts";
-import { CapCounter, assertPolicy, policyHash, policyProblems } from "./policy.ts";
-import { ap2ConstraintSchema, validateSchema } from "./schema.ts";
-import { SHARE_ID_PATTERN } from "./types.ts";
-import type { Ap2ReceiptOutcome, Ap2SkipReason, Ap2SolidarityConstraint, LogDescriptor, OwnerPolicy, PublishedStatement, Receipt } from "./types.ts";
+import { mandatePolicy } from "./client.ts";
+import { CapCounter, assertPolicy, policyProblems } from "./policy.ts";
+import { ap2MandateSchema, validateSchema } from "./schema.ts";
+import type { Ap2EnrollmentOutcome, Ap2RefusalReason, Ap2SolidarityMandate, LogDescriptor, OwnerPolicy, PublishedStatement, Receipt } from "./types.ts";
 import { applyRate, generateShareId, netCredit, nextPeriod, periodOf } from "./utils.ts";
 
 interface Owner {
@@ -28,7 +27,13 @@ interface Owner {
   counter: CapCounter;
   credits: Array<{ amount: bigint; lapsesAfter: string }>;
   suspended: boolean;
+  /** For a policy from an AP2 Solidarity Mandate: its iat, and its exp if any. */
+  iat?: number;
+  until?: number;
 }
+
+/** One policy per owner per currency (solidarity.md, "Owner policy": one policy per asset). */
+const ownerKey = (owner: string, asset: string) => `${owner}\n${asset}`;
 
 interface ProcessorShare {
   id: string;
@@ -37,6 +42,9 @@ interface ProcessorShare {
   fund: string;
   asset: string;
   amount: bigint;
+  /** The rate and refund rule in force when the share was recorded; a later policy never changes them. */
+  rate: string;
+  refunds: "keep" | "net";
   refunded: bigint;
   credited: bigint;
   committedIn: string;
@@ -51,8 +59,6 @@ export class ProcessorHolder {
   private readonly shares = new Map<string, ProcessorShare>();
   private readonly byPurchase = new Map<string, string>();
   private readonly payouts: Array<{ period: string; fund: string; asset: string; reference: string; amount: bigint }> = [];
-  /** Share ids promised in AP2 Payment Receipts, by owner, until the purchase is final. */
-  private readonly reserved = new Map<string, string>();
 
   constructor(opts: { descriptor: LogDescriptor; key: SigningKey; clock?: () => number }) {
     if (opts.descriptor.accepts) throw new Error("a processor-mode descriptor omits accepts");
@@ -64,67 +70,63 @@ export class ProcessorHolder {
     return BigInt(this.book.descriptor.minCollection ?? "0");
   }
 
+  /** Registers the owner's policy for its cap currency, replacing any policy for that currency. */
   addOwner(owner: string, policy: OwnerPolicy): void {
     assertPolicy(policy, "processor");
     if (!this.book.descriptor.funds.includes(policy.fund)) throw new Error("the log does not list this fund");
-    this.owners.set(owner, { policy, counter: new CapCounter(policy), credits: [], suspended: false });
+    this.owners.set(ownerKey(owner, policy.cap.asset), { policy, counter: new CapCounter(policy), credits: [], suspended: false });
   }
 
   /**
-   * AP2 (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Payment Mandate Constraint",
-   * "Evaluation"). Evaluates the constraint for one closed Payment Mandate. It
-   * always passes: the constraint never limits what the closed Payment Mandate
-   * may contain, so a share can never block a purchase. A party that is not the
-   * constraint's `holder` gets no receipt property and does nothing else. The
-   * holder gets the `solidarity` property for its Payment Receipt: `pending`
-   * with the id it will record the line under once the payment is final
-   * (pass that id to recordPurchase), or `skipped` with a reason.
+   * AP2 (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2: a Solidarity Mandate").
+   * The agent presented the owner's Solidarity Mandate to this holder, which
+   * has verified its signature under AP2's rules. Returns the `solidarity`
+   * property for the holder's Mandate Receipt, or nothing when this party is
+   * not the mandate's `holder` (it then ignores the mandate). Never throws on
+   * the mandate's content; throws only if `self` is not a lowercase https
+   * origin, a caller bug.
    *
-   * `owner` is however the holder knows the owner (one cap counter per owner,
-   * across every open Payment Mandate); `iat` is the open Payment Mandate's.
-   * Throws only if `self` is not an https origin, a caller bug.
+   * `owner` is however the holder knows the owner. One policy per owner per
+   * cap currency: a mandate with a later `iat` replaces the one for its
+   * currency and keeps what the owner already committed that month; one with
+   * an earlier or equal `iat` is refused as `superseded`.
    */
-  evaluateAp2(p: { self: string; owner: string; constraint: unknown; iat: number; payment: { amount: number; currency: string } }): { pass: true; receipt?: Ap2ReceiptOutcome } {
-    if (!/^https:\/\/[^/?#\s]+$/.test(p.self)) throw new Error("self must be the holder's https origin");
-    const c = p.constraint as Partial<Ap2SolidarityConstraint> | null;
-    if (!c || typeof c !== "object" || c.holder !== p.self) return { pass: true };
+  enrollAp2(p: { self: string; owner: string; mandate: unknown }): { receipt?: Ap2EnrollmentOutcome } {
+    if (!/^https:\/\/[^/?#\sA-Z]+$/.test(p.self)) throw new Error("self must be the holder's lowercase https origin");
+    const m = p.mandate as Partial<Ap2SolidarityMandate> | null;
+    if (!m || typeof m !== "object" || typeof m.holder !== "string" || m.holder.toLowerCase() !== p.self) return {};
     const log = this.book.descriptor.log;
-    const skip = (reason: Ap2SkipReason) => ({ pass: true as const, receipt: { status: "skipped" as const, reason, log } });
-    if (validateSchema(ap2ConstraintSchema, c).length) return skip("bad-policy");
-    const policy = constraintPolicy(c as Ap2SolidarityConstraint, p.iat);
-    if (policyProblems(policy, "processor").length) return skip("bad-policy");
-    if (!policy.logs?.includes(log)) return skip("wrong-log");
-    if (!this.book.descriptor.funds.includes(policy.fund)) return skip("fund-not-allowed");
-    if (p.payment.currency !== policy.cap.asset || !Number.isSafeInteger(p.payment.amount) || p.payment.amount <= 0) return skip("purchase-not-supported");
-    const known = this.owners.get(p.owner);
-    if (!known) this.addOwner(p.owner, policy);
-    else if (policyHash(known.policy) !== policyHash(policy)) {
-      known.policy = policy;
-      known.counter = known.counter.withPolicy(policy);
-    }
-    const o = this.owners.get(p.owner) as Owner;
-    if (o.suspended || o.counter.isOff) return skip("cap-reached");
-    if (applyRate(String(p.payment.amount), policy.rate) === 0n) return skip("below-minimum");
-    if (o.counter.left(periodOf(this.clock())) === 0n) return skip("cap-reached");
-    const id = generateShareId();
-    this.reserved.set(id, p.owner);
-    return { pass: true, receipt: { status: "pending", id, log } };
+    const refuse = (reason: Ap2RefusalReason) => ({ receipt: { status: "refused" as const, reason, log } });
+    if (validateSchema(ap2MandateSchema, m).length) return refuse("bad-policy");
+    const mandate = m as Ap2SolidarityMandate;
+    const now = this.clock();
+    if (!Number.isSafeInteger(mandate.cap.amount) || !Number.isSafeInteger(mandate.iat) || mandate.iat <= 0) return refuse("bad-policy");
+    if (mandate.exp !== undefined && (!Number.isSafeInteger(mandate.exp) || mandate.exp <= mandate.iat || mandate.exp <= now)) return refuse("bad-policy");
+    const policy = mandatePolicy(mandate);
+    if (policyProblems(policy, "processor").length) return refuse("bad-policy");
+    if (!policy.logs?.includes(log)) return refuse("wrong-log");
+    if (!this.book.descriptor.funds.includes(policy.fund)) return refuse("fund-not-allowed");
+    const key = ownerKey(p.owner, policy.cap.asset);
+    const known = this.owners.get(key);
+    const knownSince = known ? (known.iat ?? Math.floor(Date.parse(known.policy.since) / 1000)) : undefined;
+    if (knownSince !== undefined && knownSince >= mandate.iat) return refuse("superseded");
+    const counter = known ? known.counter.withPolicy(policy) : new CapCounter(policy);
+    this.owners.set(key, { policy, counter, credits: known?.credits ?? [], suspended: known?.suspended ?? false, iat: mandate.iat, until: mandate.exp });
+    return { receipt: { status: "enrolled", log } };
   }
 
   /**
-   * A purchase was finalized. Records the owner's share for it: floor(amount x
-   * rate), stopped at the cap, less any open `net` credit. Returns the share id,
-   * or undefined when there is no share (zero, cap reached, credit used it up).
-   * `id` is the id evaluateAp2 promised in the Payment Receipt, if any.
+   * A purchase was finalized. Records the owner's share for it under the
+   * policy for its currency in force now: floor(amount x rate), stopped at the
+   * cap, less any open `net` credit. Returns the share id, or undefined when
+   * there is no share (no policy for that currency, a policy past its `exp`,
+   * zero, cap reached, credit used it up).
    */
-  recordPurchase(p: { owner: string; purchaseId: string; amount: string; asset: string; id?: string }): string | undefined {
-    if (p.id !== undefined) {
-      if (!SHARE_ID_PATTERN.test(p.id) || this.reserved.get(p.id) !== p.owner) throw new Error("id was not reserved for this owner");
-      this.reserved.delete(p.id);
-    }
-    const o = this.owners.get(p.owner);
+  recordPurchase(p: { owner: string; purchaseId: string; amount: string; asset: string }): string | undefined {
+    const key = ownerKey(p.owner, p.asset);
+    const o = this.owners.get(key);
     if (!o || o.suspended || o.counter.isOff) return undefined;
-    if (p.asset !== o.policy.cap.asset) return undefined;
+    if (o.until !== undefined && this.clock() >= o.until) return undefined;
     if (this.byPurchase.has(p.purchaseId)) throw new Error("purchase already recorded");
     const period = periodOf(this.clock());
     let share = applyRate(p.amount, o.policy.rate);
@@ -138,9 +140,9 @@ export class ProcessorHolder {
       share -= use;
     }
     if (share <= 0n) return undefined;
-    const id = p.id ?? generateShareId();
+    const id = generateShareId();
     o.counter.commit({ id, amount: share, period, kind: "processor" });
-    this.shares.set(id, { id, owner: p.owner, purchaseId: p.purchaseId, fund: o.policy.fund, asset: p.asset, amount: share, refunded: 0n, credited: 0n, committedIn: period });
+    this.shares.set(id, { id, owner: key, purchaseId: p.purchaseId, fund: o.policy.fund, asset: p.asset, amount: share, rate: o.policy.rate, refunds: o.policy.refunds ?? "keep", refunded: 0n, credited: 0n, committedIn: period });
     this.byPurchase.set(p.purchaseId, id);
     return id;
   }
@@ -160,9 +162,9 @@ export class ProcessorHolder {
     const s = id ? this.shares.get(id) : undefined;
     if (!s) return { credit: 0n };
     const o = this.owners.get(s.owner) as Owner;
-    if ((o.policy.refunds ?? "keep") === "keep") return { credit: 0n };
+    if (s.refunds === "keep") return { credit: 0n };
     s.refunded += BigInt(p.refunded);
-    const credit = netCredit(s.refunded, o.policy.rate, s.amount, s.credited);
+    const credit = netCredit(s.refunded, s.rate, s.amount, s.credited);
     if (credit <= 0n) return { credit: 0n };
     s.credited += credit;
     const lapsesAfter = nextPeriod(periodOf(this.clock()));
@@ -172,8 +174,7 @@ export class ProcessorHolder {
 
   /** The processor's own collection from the owner was reversed: the loss is the processor's; it may suspend the policy. */
   onCollectionReversed(owner: string): void {
-    const o = this.owners.get(owner);
-    if (o) o.suspended = true;
+    for (const [k, o] of this.owners) if (k.startsWith(`${owner}\n`)) o.suspended = true;
   }
 
   /**

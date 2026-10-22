@@ -107,92 +107,91 @@ test("processor mode: the fund attests its payouts", () => {
   assert.equal(JSON.parse(p.handle(`/proofs/${id}`).body).status, "included");
 });
 
-// ---- AP2: a Payment Mandate Constraint ---------------------------------------------------------
+// ---- AP2: a Solidarity Mandate ------------------------------------------------------------------
 
 const HOLDER = "https://processor.example";
 const IAT = Date.UTC(2026, 9, 1) / 1000;
-const ap2Constraint = (over: Record<string, unknown> = {}) => ({
-  ...S.processorConstraint({ ...policy("keep"), logs: [descriptor.log] }, { holder: HOLDER }),
+const mandate = (over: Record<string, unknown> = {}, iat = IAT) => ({
+  ...S.solidarityMandate({ ...policy("keep"), logs: [descriptor.log] }, { holder: HOLDER, iat }),
   ...over,
 });
-const usd = (amount: number) => ({ amount, currency: "USD" });
+const enroll = (p: S.ProcessorHolder, m: unknown, owner = "o", self = HOLDER) => p.enrollAp2({ self, owner, mandate: m });
+const status = (r: ReturnType<typeof enroll>) => (r.receipt?.status === "refused" ? r.receipt.reason : r.receipt?.status);
 
-test("AP2 constraint: AP2's own shapes, a collision-resistant type, and the schema accepts it", () => {
-  const c = ap2Constraint();
-  assert.deepEqual(c, { type: "com.craigmerry.solidarity", holder: HOLDER, rate: "0.01", cap: { amount: 100000, currency: "USD" }, fund: FUND, logs: [descriptor.log], refunds: "keep" });
-  assert.deepEqual(S.validateSchema(S.ap2ConstraintSchema, c), []);
-  assert.deepEqual(S.constraintPolicy(c as S.Ap2SolidarityConstraint, IAT), { ...policy("keep"), logs: [descriptor.log] }, "round trip, with since from iat");
-  assert.throws(() => S.processorConstraint({ ...policy("keep"), logs: [descriptor.log], cap: { amount: "100", asset: "usd" } }, { holder: HOLDER }), /ISO 4217/);
-  assert.throws(() => S.processorConstraint({ ...policy("keep"), logs: [descriptor.log], cap: { amount: "9007199254740993", asset: "USD" } }, { holder: HOLDER }), /safe integer/);
+test("AP2 mandate: AP2's own shapes and a collision-resistant vct", () => {
+  const m = mandate();
+  assert.deepEqual(m, { vct: "com.craigmerry.solidarity.1", holder: HOLDER, rate: "0.01", cap: { amount: 100000, currency: "USD" }, fund: FUND, logs: [descriptor.log], refunds: "keep", iat: IAT });
+  assert.deepEqual(S.validateSchema(S.ap2MandateSchema, m), []);
+  assert.deepEqual(S.validateSchema(S.ap2MandateSchema, { ...m, iss: "https://ts.example", _sd_alg: "sha-256" }), [], "other SD-JWT VC claims may appear");
+  assert.deepEqual(S.mandatePolicy(m), { ...policy("keep"), logs: [descriptor.log] }, "round trip, with since from iat");
 });
 
-test("AP2 evaluation always passes; the holder alone gets a receipt property, and the line uses its id", () => {
-  const { p, clock } = setup("keep");
-  const other = p.evaluateAp2({ self: "https://network.example", owner: "o", constraint: ap2Constraint(), iat: IAT, payment: usd(4000) });
-  assert.deepEqual(other, { pass: true }, "a verifier that is not the holder does nothing");
-
-  const r = p.evaluateAp2({ self: HOLDER, owner: "owner-2", constraint: ap2Constraint(), iat: IAT, payment: usd(20000) });
-  assert.equal(r.pass, true);
-  assert.equal(r.receipt?.status, "pending");
-  assert.deepEqual(S.validateSchema(S.ap2ReceiptSchema, r.receipt), []);
-  const id = (r.receipt as { id: string }).id;
-  assert.throws(() => p.recordPurchase({ owner: "owner-1", purchaseId: "x", amount: "4000", asset: "USD", id }), /reserved/, "an id belongs to its owner");
-  assert.equal(p.recordPurchase({ owner: "owner-2", purchaseId: "p-ap2", amount: "20000", asset: "USD", id }), id, "the line is recorded under the promised id");
-  assert.equal(p.shareAmount(id), 200n);
-  assert.throws(() => p.recordPurchase({ owner: "owner-2", purchaseId: "p-again", amount: "4000", asset: "USD", id }), /reserved/, "an id is used once");
-  clock.now = Date.UTC(2026, 10, 3) / 1000;
-  assert.deepEqual(p.collect().collected, [id]);
-  clock.now = Date.UTC(2026, 11, 2) / 1000;
-  const closed = p.closePeriod("2026-11");
-  assert.ok(closed, "the AP2 share's line is in the batch for the month it was collected");
-  assert.ok(p.receipt(id)?.line.includes(id), "the owner fetches the receipt with the id from the Payment Receipt");
-});
-
-test("AP2 evaluation: every skip reason, each still a pass", () => {
+test("AP2 enrollment: the holder enrolls and says so in its Mandate Receipt; anyone else ignores the mandate", () => {
   const { p } = setup("keep");
-  const ev = (constraint: unknown, payment = usd(4000), owner = "owner-3") => p.evaluateAp2({ self: HOLDER, owner, constraint, iat: IAT, payment });
+  assert.deepEqual(enroll(p, mandate(), "o", "https://network.example"), {}, "not the holder: no receipt property, nothing done");
+  const r = enroll(p, mandate(), "owner-2");
+  assert.deepEqual(r, { receipt: { status: "enrolled", log: descriptor.log } });
+  assert.deepEqual(S.validateSchema(S.ap2EnrollmentSchema, r.receipt), []);
+  const id = p.recordPurchase({ owner: "owner-2", purchaseId: "p-ap2", amount: "20000", asset: "USD" });
+  assert.equal(p.shareAmount(id as string), 200n, "processor mode applies it to the finalized payment");
+  assert.throws(() => p.enrollAp2({ self: "https://Processor.example", owner: "x", mandate: mandate() }), /lowercase/);
+});
+
+test("AP2 enrollment: every refusal reason", () => {
+  const { p } = setup("keep");
   const seen: string[] = [];
-  const reason = (r: ReturnType<typeof ev>) => {
-    const why = r.pass === true && r.receipt?.status === "skipped" ? r.receipt.reason : r.receipt?.status;
-    if (r.receipt?.status === "skipped") seen.push(r.receipt.reason);
-    return why;
+  const reason = (r: ReturnType<typeof enroll>) => {
+    if (r.receipt?.status === "refused") seen.push(r.receipt.reason);
+    return status(r);
   };
-  assert.equal(reason(ev(ap2Constraint({ rate: "0.02" }))), "bad-policy");
-  assert.equal(reason(ev(ap2Constraint({ cap: { amount: 0, currency: "USD" } }))), "bad-policy");
-  assert.equal(reason(ev(ap2Constraint({ extra: 1 }))), "bad-policy");
-  assert.equal(reason(ev(ap2Constraint({ logs: ["https://other.example/solidarity"] }))), "wrong-log");
-  assert.equal(reason(ev(ap2Constraint({ fund: "https://elsewhere.example/fund" }))), "fund-not-allowed");
-  assert.equal(reason(ev(ap2Constraint(), { amount: 4000, currency: "EUR" })), "purchase-not-supported");
-  assert.equal(reason(ev(ap2Constraint(), usd(99))), "below-minimum", "1% of 99 cents floors to zero");
-  const small = ap2Constraint({ cap: { amount: 50, currency: "USD" } });
-  const first = ev(small, usd(4000), "owner-4");
-  assert.equal(first.receipt?.status, "pending");
-  p.recordPurchase({ owner: "owner-4", purchaseId: "c1", amount: "5000", asset: "USD", id: (first.receipt as { id: string }).id });
-  assert.equal(reason(ev(small, usd(4000), "owner-4")), "cap-reached");
-  assert.deepEqual([...new Set(seen)].sort(), [...S.AP2_SKIP_REASONS].sort(), "every reason exercised");
-  assert.deepEqual([...S.ap2ReceiptSchema.properties.reason.enum], [...S.AP2_SKIP_REASONS], "the receipt schema lists exactly these");
+  assert.equal(reason(enroll(p, mandate({ rate: "0.02" }))), "bad-policy");
+  assert.equal(reason(enroll(p, mandate({ cap: { amount: 0, currency: "USD" } }))), "bad-policy");
+  assert.equal(reason(enroll(p, mandate({ cap: { amount: 2 ** 60, currency: "USD" } }))), "bad-policy", "an unsafe integer cap");
+  assert.equal(reason(enroll(p, mandate({ iat: undefined }))), "bad-policy", "iat is required in this mandate type");
+  assert.equal(reason(enroll(p, mandate({ iat: 1e20 }))), "bad-policy");
+  assert.equal(reason(enroll(p, mandate({ exp: IAT - 1 }))), "bad-policy", "exp before iat");
+  assert.equal(reason(enroll(p, mandate({ exp: Date.UTC(2026, 9, 5) / 1000 }))), "bad-policy", "already expired");
+  assert.equal(reason(enroll(p, mandate({ holder: "https://Processor.example" }))), "bad-policy", "a mixed-case holder is refused, not silently ignored");
+  assert.equal(reason(enroll(p, mandate({ logs: ["https://other.example/solidarity"] }))), "wrong-log");
+  assert.equal(reason(enroll(p, mandate({ fund: "https://elsewhere.example/fund" }))), "fund-not-allowed");
+  assert.equal(status(enroll(p, mandate(), "owner-7")), "enrolled");
+  assert.equal(reason(enroll(p, mandate({}, IAT - 60), "owner-7")), "superseded", "an older mandate never replaces a newer one");
+  assert.equal(reason(enroll(p, mandate(), "owner-7")), "superseded", "nor does the same one again");
+  assert.deepEqual([...new Set(seen)].sort(), [...S.AP2_REFUSAL_REASONS].sort(), "every reason exercised");
+  assert.deepEqual([...S.ap2EnrollmentSchema.properties.reason.enum], [...S.AP2_REFUSAL_REASONS]);
 });
 
-test("AP2 evaluation never fails a payment, whatever it is handed", () => {
+test("AP2 enrollment never throws on the mandate's content", () => {
   const { p } = setup("keep");
-  const junk: unknown[] = [null, undefined, 0, "x", [], {}, { holder: HOLDER }, { ...ap2Constraint(), cap: "100" }, { ...ap2Constraint(), logs: "nope" }, { ...ap2Constraint(), type: "solidarity" }, JSON.parse('{"__proto__":{"holder":"https://processor.example"}}')];
-  for (const constraint of junk) {
-    for (const payment of [usd(4000), { amount: -1, currency: "USD" }, { amount: 1.5, currency: "USD" }, { amount: Number.NaN, currency: "USD" }]) {
-      const r = p.evaluateAp2({ self: HOLDER, owner: "owner-5", constraint, iat: IAT, payment });
-      assert.equal(r.pass, true, JSON.stringify(constraint));
-      if (r.receipt) assert.deepEqual(S.validateSchema(S.ap2ReceiptSchema, r.receipt), [], JSON.stringify(r.receipt));
-    }
+  const junk: unknown[] = [null, undefined, 0, "x", [], {}, { holder: HOLDER }, { ...mandate(), cap: "100" }, { ...mandate(), logs: "nope" }, { ...mandate(), vct: "solidarity" },
+    { ...mandate(), iat: Number.NaN }, { ...mandate(), exp: "soon" }, JSON.parse('{"__proto__":{"holder":"https://processor.example"}}')];
+  for (const m of junk) {
+    const r = enroll(p, m, "owner-5");
+    if (r.receipt) assert.deepEqual(S.validateSchema(S.ap2EnrollmentSchema, r.receipt), [], JSON.stringify(r.receipt));
   }
 });
 
-test("AP2: a new open Payment Mandate keeps what the owner already committed this month", () => {
-  const { p } = setup("keep");
-  const a = ap2Constraint({ cap: { amount: 60, currency: "USD" } });
-  const r1 = p.evaluateAp2({ self: HOLDER, owner: "owner-6", constraint: a, iat: IAT, payment: usd(5000) });
-  p.recordPurchase({ owner: "owner-6", purchaseId: "m1", amount: "5000", asset: "USD", id: (r1.receipt as { id: string }).id });
-  const b = ap2Constraint({ cap: { amount: 60, currency: "USD" }, rate: "0.005" });
-  const r2 = p.evaluateAp2({ self: HOLDER, owner: "owner-6", constraint: b, iat: IAT + 86400, payment: usd(5000) });
-  const id2 = (r2.receipt as { id: string }).id;
-  assert.equal(p.recordPurchase({ owner: "owner-6", purchaseId: "m2", amount: "5000", asset: "USD", id: id2 }), id2);
-  assert.equal(p.shareAmount(id2), 10n, "25 cents at the new rate, but only 10 left under the 60 cent cap after the first 50");
+test("AP2: a newer mandate replaces the policy for its currency, keeps the month's commitments, and never rewrites earlier shares", () => {
+  const { p, clock } = setup("net");
+  assert.equal(status(enroll(p, mandate({ cap: { amount: 60, currency: "USD" }, refunds: "net" }), "owner-6")), "enrolled");
+  const a = p.recordPurchase({ owner: "owner-6", purchaseId: "m1", amount: "5000", asset: "USD" }) as string;
+  assert.equal(p.shareAmount(a), 50n);
+  assert.equal(status(enroll(p, mandate({ cap: { amount: 60, currency: "USD" }, rate: "0.005", refunds: "keep" }, IAT + 86400), "owner-6")), "enrolled");
+  const b = p.recordPurchase({ owner: "owner-6", purchaseId: "m2", amount: "5000", asset: "USD" }) as string;
+  assert.equal(p.shareAmount(b), 10n, "25 cents at the new rate, but only 10 left under the 60 cent cap after the first 50");
+  assert.ok(p.refund({ purchaseId: "m1", refunded: "5000" }).credit > 0n, "the first share keeps its own net rule and 1% rate");
+  assert.equal(p.refund({ purchaseId: "m2", refunded: "5000" }).credit, 0n, "the second keeps its own keep rule");
+  void clock;
+});
+
+test("AP2: one policy per currency; a policy ends at its exp", () => {
+  const { p, clock } = setup("keep");
+  assert.equal(status(enroll(p, mandate({ cap: { amount: 90, currency: "USD" } }), "owner-8")), "enrolled");
+  assert.equal(status(enroll(p, mandate({ cap: { amount: 10, currency: "JPY" } }, IAT + 1), "owner-8")), "enrolled", "a JPY mandate is a separate policy");
+  assert.equal(p.shareAmount(p.recordPurchase({ owner: "owner-8", purchaseId: "u1", amount: "9000", asset: "USD" }) as string), 90n);
+  assert.equal(p.shareAmount(p.recordPurchase({ owner: "owner-8", purchaseId: "j1", amount: "1000", asset: "JPY" }) as string), 10n, "the USD shares never count against the JPY cap");
+  assert.equal(p.recordPurchase({ owner: "owner-8", purchaseId: "e1", amount: "1000", asset: "EUR" }), undefined, "no policy for EUR");
+  assert.equal(status(enroll(p, mandate({ exp: Date.UTC(2026, 9, 20) / 1000 }), "owner-9")), "enrolled");
+  clock.now = Date.UTC(2026, 9, 21) / 1000;
+  assert.equal(p.recordPurchase({ owner: "owner-9", purchaseId: "x1", amount: "9000", asset: "USD" }), undefined, "past exp: no share");
 });
