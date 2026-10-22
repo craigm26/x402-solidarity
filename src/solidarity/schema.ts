@@ -75,11 +75,15 @@ export const solidarityOutcomeSchema = {
     channel: { type: "object", required: ["channelId", "chargedCumulativeAmount"] },
   },
   required: ["status", "id", "log"],
-  dependentRequired: { period: ["amount"] },
+  oneOf: [
+    { properties: { status: { const: "accepted" }, reason: false }, required: ["period", "amount"] },
+    { properties: { status: { const: "pending" }, reason: false, period: false, amount: false } },
+    { properties: { status: { const: "skipped" }, period: false, amount: false }, required: ["reason"] },
+  ],
   additionalProperties: false,
 } as const;
 
-type Schema = Record<string, unknown>;
+type Schema = Record<string, unknown> | boolean;
 
 function typeOk(type: string, v: unknown): boolean {
   switch (type) {
@@ -116,6 +120,7 @@ const SUPPORTED = new Set([
   "enum",
   "items",
   "dependentRequired",
+  "oneOf",
 ]);
 
 /**
@@ -124,9 +129,15 @@ const SUPPORTED = new Set([
  * Throws on a keyword it does not implement, so it never passes silently.
  */
 export function validateSchema(schema: Schema, value: unknown, path = ""): string[] {
+  const at = path || "/";
+  if (schema === true) return [];
+  if (schema === false) return [`${at}: not allowed`];
   for (const k of Object.keys(schema)) if (!SUPPORTED.has(k)) throw new Error(`schema keyword ${k} not supported`);
   const errs: string[] = [];
-  const at = path || "/";
+  if (Array.isArray(schema.oneOf)) {
+    const passing = schema.oneOf.filter((s) => validateSchema(s as Schema, value, path).length === 0).length;
+    if (passing !== 1) errs.push(`${at}: matches ${passing} of the oneOf branches, not exactly one`);
+  }
   if ("const" in schema && JSON.stringify(schema.const) !== JSON.stringify(value)) errs.push(`${at}: must be ${JSON.stringify(schema.const)}`);
   if (Array.isArray(schema.enum) && !schema.enum.some((e) => JSON.stringify(e) === JSON.stringify(value))) errs.push(`${at}: not an allowed value`);
   if (typeof schema.type === "string" && !typeOk(schema.type, value)) {
@@ -141,7 +152,7 @@ export function validateSchema(schema: Schema, value: unknown, path = ""): strin
   }
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
-    const props = (schema.properties ?? {}) as Record<string, Schema>;
+    const props = (schema.properties ?? {}) as Record<string, Schema>; // a property may be `false`: never allowed
     for (const r of (schema.required ?? []) as string[]) if (!(r in obj)) errs.push(`${path}/${r}: required`);
     for (const [k, v] of Object.entries(obj)) {
       if (k in props) errs.push(...validateSchema(props[k], v, `${path}/${k}`));

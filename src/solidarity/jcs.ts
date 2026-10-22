@@ -30,7 +30,10 @@ function serializeNumber(n: number): string {
 }
 
 export interface CanonicalizeOptions {
-  /** Reject floating-point numbers and integers at or above 2^53 (statements). */
+  /**
+   * The statement form: only strings, non-negative integers below 2^53,
+   * arrays, objects and null. Rejects other numbers and booleans.
+   */
   strictIntegers?: boolean;
 }
 
@@ -38,12 +41,13 @@ export function canonicalize(value: unknown, opts: CanonicalizeOptions = {}): st
   if (value === null) return "null";
   switch (typeof value) {
     case "boolean":
+      if (opts.strictIntegers) throw new Error("JCS strict: booleans are not allowed");
       return value ? "true" : "false";
     case "string":
       return serializeString(value);
     case "number":
-      if (opts.strictIntegers && !Number.isSafeInteger(value)) {
-        throw new Error(`JCS strict: ${value} is not an integer below 2^53`);
+      if (opts.strictIntegers && !(Number.isSafeInteger(value) && value >= 0)) {
+        throw new Error(`JCS strict: ${value} is not a non-negative integer below 2^53`);
       }
       return serializeNumber(value);
     case "object": {
@@ -58,7 +62,7 @@ export function canonicalize(value: unknown, opts: CanonicalizeOptions = {}): st
   }
 }
 
-/** The ledger's form: strings, safe integers, arrays, objects, null (and booleans). */
+/** The ledger's form: strings, non-negative integers below 2^53, arrays, objects and null. */
 export const canonicalizeStrict = (value: unknown): string => canonicalize(value, { strictIntegers: true });
 
 /** UTF-8 bytes of the canonical form (section 3.2.4). */

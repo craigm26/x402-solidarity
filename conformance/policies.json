@@ -218,11 +218,13 @@
     "holder": "https://processor.example",
     "rate": "0.001",
     "cap": {
-      "amount": "5.00",
-      "currency": "USD"
+      "amount": "500",
+      "asset": "USD"
     },
     "fund": "https://fund.example/solidarity",
-    "refunds": "keep",
-    "log": "https://processor.example/solidarity"
+    "logs": [
+      "https://processor.example/solidarity"
+    ],
+    "refunds": "keep"
   }
 }

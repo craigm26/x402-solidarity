@@ -12,7 +12,7 @@
 
 import { getAddress } from "viem";
 import type { CapCounter } from "./policy.ts";
-import { assertPolicy } from "./policy.ts";
+import { assertPolicy, policyProblems } from "./policy.ts";
 import type {
   ChannelSnapshot,
   DescriptorAccept,
@@ -28,8 +28,8 @@ import type {
 import { SOLIDARITY, SOLIDARITY_VERSION } from "./types.ts";
 import { solidaritySchema } from "./schema.ts";
 import type { ChannelConfig, Hex, TypedDataSigner } from "./evm.ts";
-import { computeChannelId, signEip3009, signVoucher } from "./evm.ts";
-import { generateShareId, parseCaip10, periodOf, sameAccount, shareMax } from "./utils.ts";
+import { computeChannelId, signEip3009, signVoucher, verifyVoucherSignature } from "./evm.ts";
+import { generateShareId, isPositiveAmount, parseCaip10, periodOf, sameAccount, shareMax, shareNonce } from "./utils.ts";
 import { isSolidarityExtension } from "./validation.ts";
 
 /** Payment flow of an `accepts` entry (x402 v2 section 6.1), with each scheme's default. */
@@ -52,7 +52,8 @@ export function resolveFlow(req: PaymentRequirements): string {
 
 /**
  * Share kinds a purchase can carry ("Purchases that can carry a share"):
- * exact shares only with exact purchases; never on `escrow` flows; nothing for
+ * exact shares only with exact purchases; never on `escrow` flows or
+ * `batch-settlement` purchases (whose charge the log never sees); nothing for
  * other schemes.
  */
 export function shareKindsFor(req: PaymentRequirements): ShareKind[] {
@@ -63,8 +64,6 @@ export function shareKindsFor(req: PaymentRequirements): ShareKind[] {
       return flow === "authorization" || flow === "upfront" ? ["exact", "batch-settlement"] : [];
     case "upto":
       return flow === "authorization" ? ["batch-settlement"] : [];
-    case "batch-settlement":
-      return ["batch-settlement"];
     case "auth-capture":
       return flow === "authorization" ? ["batch-settlement"] : [];
     default:
@@ -82,23 +81,66 @@ export interface ClientChannel {
   network: string;
   config: ChannelConfig;
   channelId: Hex;
+  /** The client's own charged cumulative amount: never copied from a snapshot except by resyncChannel. */
   chargedCumulativeAmount: string;
+  /** The last snapshot seen, for display only. Untrusted (it passes through the seller). */
   snapshot?: ChannelSnapshot;
   busy: boolean;
+  /** The share signed on this channel and not yet applied. */
+  inFlight?: { id: string; amount: string };
 }
 
 export function openClientChannel(network: string, config: ChannelConfig): ClientChannel {
   return { network, config, channelId: computeChannelId(config, network), chargedCumulativeAmount: "0", busy: false };
 }
 
-/** Apply the snapshot from a solidarity outcome; frees the channel for the next share. */
-export function applyOutcomeToChannel(channel: ClientChannel, outcome: SolidarityOutcome | undefined): void {
+const isUint = (v: unknown): v is string => typeof v === "string" && /^(0|[1-9][0-9]*)$/.test(v);
+
+/**
+ * Apply a solidarity outcome to the channel and free it for the next share
+ * ("Share kinds", batch-settlement; the binding's client verification rules).
+ * The snapshot is untrusted: the new state is the previous one plus the
+ * reported amount (0 when skipped or missing), applied only when that amount
+ * is at most what this share signed and, if a snapshot is present, its
+ * chargedCumulativeAmount agrees. Returns false when the state is left
+ * unchanged; after a cumulative-mismatch, call resyncChannel.
+ */
+export function applyOutcomeToChannel(channel: ClientChannel, outcome: SolidarityOutcome | undefined): boolean {
+  const f = channel.inFlight;
   channel.busy = false;
+  channel.inFlight = undefined;
   const snap = outcome?.channel;
-  if (snap && snap.channelId.toLowerCase() === channel.channelId.toLowerCase()) {
-    channel.chargedCumulativeAmount = snap.chargedCumulativeAmount;
-    channel.snapshot = snap;
+  const sameChannel = !!snap && typeof snap.channelId === "string" && snap.channelId.toLowerCase() === channel.channelId.toLowerCase();
+  if (sameChannel) channel.snapshot = snap;
+  if (!f) return false;
+  if (outcome && outcome.id !== f.id) return false;
+  let charged = 0n;
+  if (outcome?.status === "accepted") {
+    if (!isPositiveAmount(outcome.amount)) return false;
+    charged = BigInt(outcome.amount);
   }
+  if (charged > BigInt(f.amount)) return false;
+  const next = BigInt(channel.chargedCumulativeAmount) + charged;
+  if (snap && (!sameChannel || !isUint(snap.chargedCumulativeAmount) || BigInt(snap.chargedCumulativeAmount) !== next)) return false;
+  channel.chargedCumulativeAmount = next.toString();
+  return true;
+}
+
+/**
+ * Recover after a cumulative-mismatch: adopt the log's chargedCumulativeAmount
+ * only when the snapshot carries a voucher this client signed (`signature`
+ * over `signedMaxClaimable`) and the amount is at most that ceiling, as with
+ * the binding's Corrective 402. Returns true when the state was adopted.
+ */
+export async function resyncChannel(channel: ClientChannel, snap: ChannelSnapshot | undefined): Promise<boolean> {
+  if (channel.busy || !snap || typeof snap.channelId !== "string" || snap.channelId.toLowerCase() !== channel.channelId.toLowerCase()) return false;
+  const { signedMaxClaimable: max, signature, chargedCumulativeAmount: charged } = snap;
+  if (!isUint(max) || !isUint(charged) || typeof signature !== "string" || !/^0x[0-9a-fA-F]+$/.test(signature)) return false;
+  if (BigInt(charged) > BigInt(max)) return false;
+  const ok = await verifyVoucherSignature(channel.config, { channelId: channel.channelId, maxClaimableAmount: max, signature: signature as Hex }, channel.network);
+  if (!ok) return false;
+  channel.chargedCumulativeAmount = charged;
+  return true;
 }
 
 export interface ShareContext {
@@ -116,7 +158,7 @@ export interface BuildShareInput {
   declared?: SolidarityInfo;
   /** The purchase's chosen `accepts` entry. */
   accepted: PaymentRequirements;
-  /** The purchase's EIP-3009 window, when there is one; the share's validBefore is no later. */
+  /** The purchase's EIP-3009 window, when there is one; the share's validBefore is at least maxTimeoutSeconds later. */
   purchaseWindow?: { validAfter: string; validBefore: string };
   /** Fallback only: a log the client knows out of band runs at the purchase's facilitator. */
   fallbackLog?: string;
@@ -128,9 +170,8 @@ export interface BuildShareInput {
   mandateHolder?: string;
   /** This client's own holder id, compared with mandateHolder. */
   self?: string;
-  /** Test hook: a fixed id or nonce for reproducible vectors. Never set in production. */
+  /** Test hook: a fixed id for reproducible vectors (the nonce follows from it). Never set in production. */
   fixedId?: string;
-  fixedNonce?: Hex;
 }
 
 export type ShareDecision =
@@ -139,12 +180,23 @@ export type ShareDecision =
 
 /**
  * Decide whether to add a share and, if so, build and sign the full
- * `extensions.solidarity.info`. Counts the share against the cap when it signs.
+ * `extensions.solidarity.info`. Counts the share against the cap before it
+ * signs. Never rejects: a share never blocks the purchase, so anything that
+ * goes wrong is `{attached: false, why}` and the purchase goes ahead without one.
  */
 export async function buildShare(ctx: ShareContext, input: BuildShareInput): Promise<ShareDecision> {
+  try {
+    return await buildShareOrThrow(ctx, input);
+  } catch (e) {
+    return { attached: false, why: `no share: ${(e as Error)?.message ?? String(e)}` };
+  }
+}
+
+async function buildShareOrThrow(ctx: ShareContext, input: BuildShareInput): Promise<ShareDecision> {
   const { policy, counter, signer, descriptor } = ctx;
   const now = ctx.now ?? Math.floor(Date.now() / 1000);
-  assertPolicy(policy, "separate");
+  const problems = policyProblems(policy, "separate");
+  if (problems.length) return { attached: false, why: `invalid owner policy: ${problems.join("; ")}` };
   const req = input.accepted;
 
   if (input.mandateHolder !== undefined && input.mandateHolder !== input.self) {
@@ -212,31 +264,54 @@ export async function buildShare(ctx: ShareContext, input: BuildShareInput): Pro
   };
 
   const id = input.fixedId ?? generateShareId();
-  let payload: Record<string, unknown>;
   let validBefore: number | undefined;
+  let ch: ClientChannel | undefined;
+  let max = "";
   if (kind === "exact") {
-    validBefore = now + entry.maxTimeoutSeconds;
-    if (input.purchaseWindow) validBefore = Math.min(validBefore, Number(input.purchaseWindow.validBefore));
-    const validAfter = input.purchaseWindow?.validAfter ?? "0";
-    const signed = await signEip3009(signer, accepted, { validAfter, validBefore: String(validBefore), nonce: input.fixedNonce });
-    payload = signed as unknown as Record<string, unknown>;
+    // At least maxTimeoutSeconds after the purchase's validBefore, so the log can still
+    // submit the transfer after the purchase settles.
+    const purchaseEnd = input.purchaseWindow ? Number(input.purchaseWindow.validBefore) : now + entry.maxTimeoutSeconds;
+    validBefore = purchaseEnd + entry.maxTimeoutSeconds;
   } else {
-    const ch = input.channel as ClientChannel;
+    ch = input.channel as ClientChannel;
     if (ch.busy) return { attached: false, why: "a share is in flight on this channel (serialize, or use another salt)" };
     if (!sameAccount(ch.config.receiver, fund.address)) return { attached: false, why: "channel receiver is not the fund" };
     if (!sameAccount(ch.config.receiverAuthorizer, String(entry.extra?.receiverAuthorizer ?? ""))) {
       return { attached: false, why: "channel receiverAuthorizer is not the log's" };
     }
-    if (ch.config.withdrawDelay < (descriptor.minWithdrawDelay ?? 0)) return { attached: false, why: "channel withdrawDelay below the log's minimum" };
-    const max = (BigInt(ch.chargedCumulativeAmount) + amount).toString();
-    const voucher = await signVoucher(signer, ch.channelId, max, req.network);
-    payload = { type: "voucher", channelConfig: ch.config, voucher };
-    ch.busy = true;
+    if (!sameAccount(ch.config.token, req.asset)) return { attached: false, why: "channel token is not the purchase's asset" };
+    if (ch.config.withdrawDelay !== entry.extra?.withdrawDelay) return { attached: false, why: "channel withdrawDelay is not the log's" };
+    max = (BigInt(ch.chargedCumulativeAmount) + amount).toString();
   }
 
-  // Counted when signed, at the signed amount ("whatever status is reported later"). For an
-  // upto purchase that settles for less, the log records less but the cap keeps the signed amount.
+  // Reserve before the first await, so concurrent shares can neither pass the cap nor
+  // sign two vouchers on one channel base. Counted at the signed amount ("whatever status is
+  // reported later"): for an upto purchase that settles for less, the cap keeps the signed amount.
   counter.commit({ id, amount, period, kind, validBefore });
+  if (ch) {
+    ch.busy = true;
+    ch.inFlight = { id, amount: amount.toString() };
+  }
+  let payload: Record<string, unknown>;
+  try {
+    if (kind === "exact") {
+      const validAfter = input.purchaseWindow?.validAfter ?? "0";
+      const signed = await signEip3009(signer, accepted, { validAfter, validBefore: String(validBefore), nonce: shareNonce(id) });
+      payload = signed as unknown as Record<string, unknown>;
+    } else {
+      const c = ch as ClientChannel;
+      const voucher = await signVoucher(signer, c.channelId, max, req.network);
+      payload = { type: "voucher", channelConfig: c.config, voucher };
+    }
+  } catch (e) {
+    // Nothing was signed: give the room back and free the channel.
+    counter.abort(id);
+    if (ch) {
+      ch.busy = false;
+      ch.inFlight = undefined;
+    }
+    return { attached: false, why: `signing failed: ${(e as Error)?.message ?? String(e)}` };
+  }
 
   const info: SolidarityInfo = {
     version: SOLIDARITY_VERSION,
@@ -274,7 +349,7 @@ export async function appendSolidarityToExtensions(
   return decision;
 }
 
-/** Read the solidarity outcome from a SettleResponse (unsigned; keep channel state with it, never treat it as proof). */
+/** Read the solidarity outcome from a SettleResponse (unsigned: never proof; see applyOutcomeToChannel for channel state). */
 export function readOutcome(settleResponse: { extensions?: Record<string, unknown> }): SolidarityOutcome | undefined {
   const ext = settleResponse.extensions?.[SOLIDARITY] as { info?: SolidarityOutcome } | undefined;
   return ext?.info;
@@ -282,33 +357,24 @@ export function readOutcome(settleResponse: { extensions?: Record<string, unknow
 
 // ---- processor mode: fields only ---------------------------------------------
 
-/** Minor-unit exponents for the ISO 4217 codes the examples use. Extend as needed. */
-export const ISO4217_EXPONENT: Record<string, number> = { USD: 2, EUR: 2, GBP: 2, CAD: 2, AUD: 2, CHF: 2, JPY: 0, KRW: 0 };
-
-function minorToDecimal(amount: string, exponent: number): string {
-  if (exponent === 0) return amount;
-  const s = amount.padStart(exponent + 1, "0");
-  return `${s.slice(0, -exponent)}.${s.slice(-exponent)}`;
-}
-
 /**
  * The AP2-style mandate constraint that carries a processor-mode policy
- * ("AP2 and ACP notes", informative). The cap is written as a decimal
- * currency amount there; the policy holds it in minor units of an ISO 4217
- * code, so `cap.asset` must be such a code.
+ * ("AP2 and ACP notes", informative): the policy's own fields, with `cap` in
+ * the policy's units (minor units of an ISO 4217 code on card and bank
+ * rails), plus `holder`, the one party that applies the share.
  */
-export function processorConstraint(policy: OwnerPolicy, opts: { holder: string; log: string }) {
+export function processorConstraint(policy: OwnerPolicy, opts: { holder: string; logs?: string[] }) {
   assertPolicy(policy, "processor");
-  const exp = ISO4217_EXPONENT[policy.cap.asset];
-  if (exp === undefined) throw new Error(`cap.asset ${policy.cap.asset} is not an ISO 4217 code this helper knows`);
+  const logs = opts.logs ?? policy.logs;
+  if (!logs || logs.length === 0) throw new Error("the constraint names the holder's log in logs");
   return {
     type: SOLIDARITY,
     holder: opts.holder,
     rate: policy.rate,
-    cap: { amount: minorToDecimal(policy.cap.amount, exp), currency: policy.cap.asset },
+    cap: { amount: policy.cap.amount, asset: policy.cap.asset },
     fund: policy.fund,
+    logs: [...logs],
     refunds: policy.refunds ?? "keep",
-    log: opts.log,
   };
 }
 

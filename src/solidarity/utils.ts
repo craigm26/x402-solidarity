@@ -4,7 +4,7 @@
  * rounded except by the floor the spec asks for.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { AMOUNT_PATTERN, CAIP10_PATTERN, PERIOD_PATTERN, RATE_PATTERN, SHARE_ID_PATTERN } from "./types.ts";
 
 /**
@@ -17,6 +17,16 @@ export function generateShareId(): string {
 }
 
 export const isValidShareId = (id: unknown): id is string => typeof id === "string" && SHARE_ID_PATTERN.test(id);
+
+/**
+ * The EIP-3009 nonce of an `exact` share: SHA-256("solidarity/2|" + id) as
+ * 0x-prefixed lowercase hex ("Share kinds", `exact`). The id stays random; the
+ * nonce ties it to what the payer signs, so a relaying seller cannot record
+ * the share under an id of its own.
+ */
+export function shareNonce(id: string): `0x${string}` {
+  return `0x${createHash("sha256").update(`solidarity/2|${id}`).digest("hex")}`;
+}
 export const isValidRate = (rate: unknown): rate is string => typeof rate === "string" && RATE_PATTERN.test(rate);
 export const isPositiveAmount = (a: unknown): a is string => typeof a === "string" && AMOUNT_PATTERN.test(a);
 export const isPeriod = (p: unknown): p is string => typeof p === "string" && PERIOD_PATTERN.test(p);
@@ -43,9 +53,16 @@ export function recordedShare(signed: string | bigint, basis: string | bigint, r
   return min(BigInt(signed), applyRate(basis, rate));
 }
 
-/** `net` refunds (processor mode): floor(refunded x rate), never more than the original share. */
-export function netCredit(refunded: string | bigint, rate: string, originalShare: string | bigint): bigint {
-  return min(applyRate(refunded, rate), BigInt(originalShare));
+/**
+ * `net` refunds (processor mode), counted per purchase. `refunded` is the total
+ * refunded for that purchase so far, `share` the amount recorded for it and
+ * `alreadyCredited` what earlier refunds of it credited. The credits for one
+ * purchase never add up to more than min(floor(total refunded x rate), share),
+ * so several partial refunds credit exactly what one refund of the same total would.
+ */
+export function netCredit(refunded: string | bigint, rate: string, share: string | bigint, alreadyCredited: string | bigint = 0n): bigint {
+  const left = min(applyRate(refunded, rate), BigInt(share)) - BigInt(alreadyCredited);
+  return left > 0n ? left : 0n;
 }
 
 /**

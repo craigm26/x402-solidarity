@@ -21,8 +21,8 @@ function setup(refunds: "keep" | "net") {
   return { p, clock, key };
 }
 
-test("processor mode: a descriptor with accepts or minWithdrawDelay is refused", () => {
-  assert.throws(() => new S.ProcessorHolder({ descriptor: { ...descriptor, minWithdrawDelay: 1 }, key: S.generateSigningKey("EdDSA", "k") }), /omits/);
+test("processor mode: a descriptor with accepts is refused", () => {
+  assert.throws(() => new S.ProcessorHolder({ descriptor: { ...descriptor, accepts: [] }, key: S.generateSigningKey("EdDSA", "k") }), /omits/);
 });
 
 test("processor mode: one line per finalized purchase, collected in aggregate; small totals carry forward", () => {
@@ -44,7 +44,7 @@ test("processor mode: one line per finalized purchase, collected in aggregate; s
   const np = S.decodeStatement(nov.statement).payload;
   assert.equal(np.size, 2);
   assert.deepEqual(np.totals, [{ fund: FUND, asset: "USD", lines: 2, amount: "110" }]);
-  assert.match(p.handle("/settlements/2026-11").body, /\|payout:2026-11-1\|110\n$/);
+  assert.match(p.handle("/settlements/2026-11").body, /\|payout:processor\.example\/2026-11\/1\|110\n$/, "payout references start with the log's host");
   assert.deepEqual(S.verifyChain([oct, nov]), { ok: true, problems: [] });
 });
 

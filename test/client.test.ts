@@ -66,7 +66,8 @@ test("separate mode: an exact share for a 48 USDC purchase, signed with EIP-3009
   assert.equal(p.authorization.from, c.signer.address);
   assert.equal(getAddress(p.authorization.to), getAddress("0x000000000000000000000000000000000000f00d"));
   assert.equal(p.authorization.value, "48000");
-  assert.equal(p.authorization.validBefore, String(NOW + 30), "no later than the purchase's validBefore");
+  assert.equal(p.authorization.validBefore, String(NOW + 30 + 60), "maxTimeoutSeconds after the purchase's validBefore");
+  assert.equal(p.authorization.nonce, S.shareNonce(info.id as string), "the nonce binds the id");
   // Independent check with viem directly, domain spelled out.
   const ok = await verifyTypedData({
     address: c.signer.address,
@@ -121,7 +122,7 @@ test("which purchases can carry a share", () => {
   assert.deepEqual(S.shareKindsFor({ ...req("1", "upto"), network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" }), [], "SVM upto defaults to escrow");
   assert.deepEqual(S.shareKindsFor(req("1", "auth-capture")), [], "auth-capture defaults to escrow");
   assert.deepEqual(S.shareKindsFor(req("1", "auth-capture", { paymentFlow: "authorization" })), ["batch-settlement"]);
-  assert.deepEqual(S.shareKindsFor(req("1", "batch-settlement")), ["batch-settlement"]);
+  assert.deepEqual(S.shareKindsFor(req("1", "batch-settlement")), [], "the log never sees a batch-settlement purchase's charge");
   assert.deepEqual(S.shareKindsFor(req("1", "something-else")), []);
 });
 
@@ -162,7 +163,8 @@ test("the owner's logs, the fund's network and the log's allow-list are respecte
   const c3 = ctx({ ...POLICY, fund: "eip155:84532:0x000000000000000000000000000000000000dead" });
   assert.equal((await S.buildShare(c3, { declared, accepted: req("48000000") })).attached, false);
   const c4 = ctx({ ...POLICY, refunds: "net" });
-  await assert.rejects(() => S.buildShare(c4, { declared, accepted: req("48000000") }), /keep only/);
+  const net = await S.buildShare(c4, { declared, accepted: req("48000000") });
+  assert.ok(!net.attached && /keep only/.test(net.why), "never rejects: no share, and the purchase goes ahead");
 });
 
 test("exactly one policy holder: no share under a mandate whose holder is someone else", async () => {
@@ -175,10 +177,10 @@ test("exactly one policy holder: no share under a mandate whose holder is someon
 });
 
 test("processor mode fields: the mandate constraint carries the policy", () => {
-  const c = S.processorConstraint({ ...POLICY, cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity", refunds: "net" }, { holder: "https://processor.example", log: "https://processor.example/solidarity" });
-  assert.deepEqual(c, { type: "solidarity", holder: "https://processor.example", rate: "0.001", cap: { amount: "5.00", currency: "USD" }, fund: "https://fund.example/solidarity", refunds: "net", log: "https://processor.example/solidarity" });
-  assert.deepEqual(conformance("policies.json").processorConstraint.cap, { amount: "5.00", currency: "USD" });
-  assert.throws(() => S.processorConstraint(POLICY, { holder: "h", log: "l" }), /ISO 4217/);
+  const c = S.processorConstraint({ ...POLICY, cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity", refunds: "net" }, { holder: "https://processor.example", logs: ["https://processor.example/solidarity"] });
+  assert.deepEqual(c, { type: "solidarity", holder: "https://processor.example", rate: "0.001", cap: { amount: "500", asset: "USD" }, fund: "https://fund.example/solidarity", logs: ["https://processor.example/solidarity"], refunds: "net" });
+  assert.deepEqual(conformance("policies.json").processorConstraint.cap, { amount: "500", asset: "USD" }, "the policy's own units: minor units of USD");
+  assert.throws(() => S.processorConstraint({ ...POLICY, logs: undefined }, { holder: "h" }), /logs/);
 });
 
 test("declaration helper rejects malformed or duplicate logs entries", () => {

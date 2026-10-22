@@ -13,7 +13,7 @@ import { canonicalizeStrict, isCanonical } from "./jcs.ts";
 import { buildTree, EMPTY_ROOT_HEX, verifyInclusion } from "./merkle.ts";
 import type { JwsEnvelope, LogDescriptor, PublishedStatement, Receipt, StatementPayload, TotalsRow } from "./types.ts";
 import { AMOUNT_PATTERN, LINE_PREFIX, PERIOD_PATTERN, SHARE_ID_PATTERN } from "./types.ts";
-import { b64url, bytewise, canonicalAccount, nextPeriod, parseCaip10, unb64url } from "./utils.ts";
+import { b64url, bytewise, canonicalAccount, nextPeriod, parseCaip10, sameAccount, unb64url } from "./utils.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -50,16 +50,24 @@ export function parseLine(line: string): { period: string; fund: string; asset: 
   return out;
 }
 
-/** A /lines or /settlements file: entries sorted bytewise, each followed by one LF. */
-export const fileBody = (entries: string[]): string => [...entries].sort(bytewise).map((e) => `${e}\n`).join("");
+/** A /lines or /settlements file: entries sorted bytewise, each followed by one LF. Throws on a repeated entry. */
+export function fileBody(entries: string[]): string {
+  const sorted = [...entries].sort(bytewise);
+  for (let i = 1; i < sorted.length; i++) if (sorted[i] === sorted[i - 1]) throw new Error("an entry is repeated");
+  return sorted.map((e) => `${e}\n`).join("");
+}
 
+/** Entries of a /lines or /settlements file: sorted bytewise, none repeated, each ending in LF. */
 export function parseFileBody(body: string): string[] {
   if (body === "") return [];
   if (!body.endsWith("\n")) throw new Error("every entry must end with LF");
   const entries = body.slice(0, -1).split("\n");
   if (entries.some((e) => e === "")) throw new Error("empty entry");
-  const sorted = [...entries].sort(bytewise);
-  if (sorted.some((e, i) => e !== entries[i])) throw new Error("entries are not sorted bytewise");
+  for (let i = 1; i < entries.length; i++) {
+    const c = bytewise(entries[i - 1], entries[i]);
+    if (c > 0) throw new Error("entries are not sorted bytewise");
+    if (c === 0) throw new Error("an entry is repeated");
+  }
   return entries;
 }
 
@@ -118,11 +126,28 @@ export interface SettlementFields {
   amount: string | bigint;
 }
 
+/**
+ * A settlement reference in canonical form: EVM hex (transaction hashes and
+ * channel ids) lowercase, so one transfer or claim has exactly one spelling.
+ * Payout references are the processor's own and are left as they are.
+ */
+export function canonicalRef(ref: string): string {
+  const m = /^(exact|claim):(.*)$/.exec(ref);
+  if (!m) return ref;
+  return `${m[1]}:${m[2]
+    .split(":")
+    .map((x) => (/^0x[0-9a-fA-F]+$/.test(x) ? x.toLowerCase() : x))
+    .join(":")}`;
+}
+
+const TX = "(?:0x[0-9a-f]{64}|(?!0x)[^:]+)"; // EVM hex is a 32-byte lowercase hash; other chains spell their own
+const REF_PATTERN = new RegExp(`^(?:exact:${TX}|claim:${TX}:${TX}|payout:.+)$`);
+
 /** `<fund>|<asset>|<ref>|<amount>`, ref one of exact:<tx>, claim:<tx>:<channelId>, payout:<reference>. */
 export function formatSettlement(f: SettlementFields): string {
-  const v = { fund: canonicalAccount(f.fund), asset: canonicalAccount(f.asset), ref: f.ref, amount: String(f.amount) };
+  const v = { fund: canonicalAccount(f.fund), asset: canonicalAccount(f.asset), ref: canonicalRef(f.ref), amount: String(f.amount) };
   for (const [k, x] of Object.entries(v)) if (!FIELD.test(x)) throw new Error(`settlement field ${k} must be printable ASCII with no '|' or space`);
-  if (!/^(exact:[^:]+|claim:[^:]+:[^:]+|payout:.+)$/.test(v.ref)) throw new Error("ref must be exact:<tx>, claim:<tx>:<channelId> or payout:<reference>");
+  if (!REF_PATTERN.test(v.ref)) throw new Error("ref must be exact:<tx>, claim:<tx>:<channelId> or payout:<reference>");
   if (!AMOUNT_PATTERN.test(v.amount)) throw new Error("amount must be a positive integer with no leading zeros");
   return `${v.fund}|${v.asset}|${v.ref}|${v.amount}`;
 }
@@ -218,9 +243,12 @@ function rawSign(alg: JwsAlg, data: Uint8Array, key: KeyObject): Uint8Array {
   return new Uint8Array(nodeSign("sha256", data, { key, dsaEncoding: "ieee-p1363" }));
 }
 
+/** The JWS `alg` is tied to the key type: EdDSA needs an Ed25519 key, ES256 a P-256 key (RFC 7515, RFC 8725 section 3.1). */
 function rawVerify(alg: JwsAlg, data: Uint8Array, key: KeyObject, sig: Uint8Array): boolean {
   try {
-    if (alg === "EdDSA") return nodeVerify(null, data, key, sig);
+    if (alg === "EdDSA") return key.asymmetricKeyType === "ed25519" && nodeVerify(null, data, key, sig);
+    const curve = key.asymmetricKeyDetails?.namedCurve;
+    if (key.asymmetricKeyType !== "ec" || (curve !== "prime256v1" && curve !== "P-256")) return false;
     if (sig.length !== 64) return false;
     return nodeVerify("sha256", data, { key, dsaEncoding: "ieee-p1363" }, sig);
   } catch {
@@ -274,18 +302,109 @@ export function signStatement(payload: StatementPayload, key: SigningKey): Publi
   return { statement: { format: "jws", signature: jwsSign(statementBytes(payload), key) }, cosignatures: [] };
 }
 
-/** Decode a statement envelope; rejects a payload whose bytes are not the JCS form of its content. */
+const HEX64 = /^[0-9a-f]{64}$/;
+const STATEMENT_FIELDS = ["issuedAt", "log", "period", "previous", "root", "settlements", "size", "totals", "version"];
+const TOTALS_FIELDS = ["amount", "asset", "fund", "lines"];
+const isCount = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+
+/**
+ * Problems with a statement payload's fields ("Statements"): exactly the
+ * listed fields, each of its type and form, and totals rows in the form
+ * lines use, strictly sorted, adding up to `size`. [] when it is fine.
+ */
+export function statementProblems(payload: unknown): string[] {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return ["payload is not an object"];
+  const p = payload as Record<string, unknown>;
+  const out: string[] = [];
+  for (const k of Object.keys(p)) if (!STATEMENT_FIELDS.includes(k)) out.push(`unknown field ${k}`);
+  for (const k of STATEMENT_FIELDS) if (!(k in p)) out.push(`missing ${k}`);
+  if (p.version !== 2) out.push("version must be 2");
+  if (typeof p.log !== "string" || !/^https:\/\/[\x21-\x7e]+$/.test(p.log)) out.push("log must be an https URL");
+  if (typeof p.period !== "string" || !PERIOD_PATTERN.test(p.period)) out.push("period must be YYYY-MM");
+  if (!isCount(p.size)) out.push("size must be a non-negative integer");
+  if (typeof p.root !== "string" || !HEX64.test(p.root)) out.push("root must be 64 lowercase hex characters");
+  if (typeof p.settlements !== "string" || !HEX64.test(p.settlements)) out.push("settlements must be 64 lowercase hex characters");
+  if (p.previous !== null && (typeof p.previous !== "string" || !HEX64.test(p.previous))) out.push("previous must be null or 64 lowercase hex characters");
+  if (!isCount(p.issuedAt)) out.push("issuedAt must be a non-negative integer");
+  if (!Array.isArray(p.totals)) return [...out, "totals must be an array"];
+  let lines = 0;
+  let prev: { fund: string; asset: string } | undefined;
+  p.totals.forEach((row: unknown, i: number) => {
+    const r = row as Record<string, unknown>;
+    if (typeof r !== "object" || r === null || Array.isArray(r) || Object.keys(r).sort().join() !== TOTALS_FIELDS.join()) {
+      out.push(`totals[${i}] must have exactly fund, asset, lines and amount`);
+      return;
+    }
+    for (const k of ["fund", "asset"] as const) {
+      const v = r[k];
+      if (typeof v !== "string" || !FIELD.test(v) || canonicalAccount(v) !== v) out.push(`totals[${i}].${k} is not in the form lines use`);
+    }
+    if (!Number.isSafeInteger(r.lines) || (r.lines as number) < 1) out.push(`totals[${i}].lines must be a positive integer`);
+    else lines += r.lines as number;
+    if (typeof r.amount !== "string" || !AMOUNT_PATTERN.test(r.amount)) out.push(`totals[${i}].amount must be a positive integer string`);
+    const cur = { fund: String(r.fund), asset: String(r.asset) };
+    if (prev && (bytewise(prev.fund, cur.fund) || bytewise(prev.asset, cur.asset)) >= 0) out.push(`totals[${i}] is out of order or repeated`);
+    prev = cur;
+  });
+  if (isCount(p.size) && lines !== p.size) out.push("totals lines do not add up to size");
+  if (p.size === 0 && p.root !== EMPTY_ROOT_HEX) out.push("an empty batch has the root SHA-256(\"\")");
+  return out;
+}
+
+/** Decode a statement envelope; rejects a payload that is not in JCS form or whose fields are not as specified. */
 export function decodeStatement(env: JwsEnvelope): { payload: StatementPayload; bytes: Uint8Array; hash: string; kid: string; alg: string } {
   if (env?.format !== "jws") throw new Error("statement format must be jws");
   const d = jwsDecode(env.signature);
   if (!isCanonical(d.payloadText, { strictIntegers: true })) throw new Error("statement payload is not in JCS form");
   const payload = JSON.parse(d.payloadText) as StatementPayload;
-  if (payload.version !== 2) throw new Error("not a version 2 statement");
+  if (payload?.version !== 2) throw new Error("not a version 2 statement");
+  const problems = statementProblems(payload);
+  if (problems.length) throw new Error(`statement payload: ${problems.join("; ")}`);
   return { payload, bytes: d.payloadBytes, hash: sha256Hex(d.payloadBytes), kid: d.header.kid, alg: d.header.alg };
 }
 
-/** Resolves a DID URL `kid` to a public key. A real verifier uses did:web or DNS (offer-and-receipt section 4.5.1). */
-export type KeyResolver = (kid: string) => KeyObject | undefined;
+/**
+ * Resolves a DID URL `kid` to a public key. A real verifier uses did:web or
+ * DNS (offer-and-receipt section 4.5.1). `context` says whose key is wanted:
+ * the log named in the statement, or a cosigner of it.
+ */
+export type KeyResolver = (kid: string, context: { log: string; role: "log" | "cosigner" }) => KeyObject | undefined;
+
+/** The host a did:web DID URL names (`did:web:example.com%3A8443:path#key` gives `example.com:8443`), or undefined. */
+export function didWebHost(kid: string): string | undefined {
+  const m = /^did:web:([^:#?/]+)/.exec(kid);
+  if (!m) return undefined;
+  try {
+    return decodeURIComponent(m[1]).toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The default check that a statement key belongs to the log ("Signatures and
+ * keys"): a did:web key on the log URL's host. A verifier that also accepts
+ * the DNS route (`_controllers.<host>`) passes its own `authorizeLogKey`.
+ */
+export function kidOnLogHost(kid: string, log: string): boolean {
+  let host: string;
+  try {
+    host = new URL(log).host.toLowerCase();
+  } catch {
+    return false;
+  }
+  return didWebHost(kid) === host;
+}
+
+/** What verifyStatement, verifyReceipt, Witness and FundCosigner take. */
+export interface VerifyOptions {
+  resolveKey: KeyResolver;
+  /** The log's descriptor: the statement must be for its log, by a key it lists for the period. */
+  descriptor?: Pick<LogDescriptor, "keys" | "log">;
+  requireCosigners?: string[];
+  /** Is `kid` authorized for `log`? Default: a did:web key on the log's host. */
+  authorizeLogKey?: (kid: string, log: string) => boolean;
+}
 
 export function staticResolver(keys: Record<string, KeyObject>): KeyResolver {
   return (kid) => keys[kid];
@@ -309,10 +428,7 @@ export interface StatementCheck {
  * key the descriptor lists for that period, when a descriptor is given) and
  * every cosignature the verifier requires (by kid).
  */
-export function verifyStatement(
-  pub: PublishedStatement,
-  opts: { resolveKey: KeyResolver; descriptor?: Pick<LogDescriptor, "keys" | "log">; requireCosigners?: string[] },
-): StatementCheck {
+export function verifyStatement(pub: PublishedStatement, opts: VerifyOptions): StatementCheck {
   const problems: string[] = [];
   let d: ReturnType<typeof decodeStatement>;
   try {
@@ -320,11 +436,13 @@ export function verifyStatement(
   } catch (e) {
     return { ok: false, problems: [(e as Error).message], cosigners: [] };
   }
+  // The key must belong to the log the statement names, whether or not a descriptor is given.
+  if (!(opts.authorizeLogKey ?? kidOnLogHost)(d.kid, d.payload.log)) problems.push(`key ${d.kid} is not authorized for ${d.payload.log}`);
   if (opts.descriptor) {
     if (opts.descriptor.log !== d.payload.log) problems.push("statement is for another log");
     if (!keyCoversPeriod(opts.descriptor, d.kid, d.payload.period)) problems.push(`key ${d.kid} is not listed for ${d.payload.period}`);
   }
-  const logKey = opts.resolveKey(d.kid);
+  const logKey = opts.resolveKey(d.kid, { log: d.payload.log, role: "log" });
   if (!logKey) problems.push(`no key for ${d.kid}`);
   else if (!jwsVerify(pub.statement.signature, logKey)) problems.push("log signature invalid");
 
@@ -333,7 +451,7 @@ export function verifyStatement(
     try {
       const cd = jwsDecode(c.signature);
       if (Buffer.compare(Buffer.from(cd.payloadBytes), Buffer.from(d.bytes)) !== 0) continue;
-      const k = opts.resolveKey(cd.header.kid);
+      const k = opts.resolveKey(cd.header.kid, { log: d.payload.log, role: "cosigner" });
       if (k && jwsVerify(c.signature, k)) cosigners.push(cd.header.kid);
     } catch {
       // an unreadable cosignature simply does not count
@@ -384,10 +502,7 @@ export interface ReceiptCheck {
  * requires, check that the line's period equals the statement's, and verify
  * the audit path."
  */
-export function verifyReceipt(
-  receipt: Receipt,
-  opts: { resolveKey: KeyResolver; descriptor?: Pick<LogDescriptor, "keys" | "log">; requireCosigners?: string[] },
-): ReceiptCheck {
+export function verifyReceipt(receipt: Receipt, opts: VerifyOptions): ReceiptCheck {
   const out: ReceiptCheck = { ok: false, canonical: false, period: false, included: false, signature: false, cosigners: [], problems: [] };
   if (receipt?.version !== 2) {
     out.problems.push("receipt version must be 2");
@@ -398,7 +513,7 @@ export function verifyReceipt(
   out.problems.push(...st.problems);
   if (!st.payload) return out;
   out.canonical = true;
-  out.signature = !st.problems.some((p) => p.startsWith("log signature") || p.startsWith("no key"));
+  out.signature = !st.problems.some((p) => p.startsWith("log signature") || p.startsWith("no key") || p.includes("is not authorized for"));
   try {
     out.period = parseLine(receipt.line).period === st.payload.period;
   } catch (e) {
@@ -431,14 +546,13 @@ export class Witness {
 
   cosign(
     pub: PublishedStatement,
-    opts: {
-      resolveKey: KeyResolver;
-      descriptor?: Pick<LogDescriptor, "keys" | "log">;
+    opts: Omit<VerifyOptions, "requireCosigners"> & {
       history?: PublishedStatement[];
       files?: { lines: string; settlements: string };
     },
   ): JwsEnvelope {
-    const st = verifyStatement({ statement: pub.statement, cosignatures: [] }, { resolveKey: opts.resolveKey, descriptor: opts.descriptor });
+    const vopts: VerifyOptions = { resolveKey: opts.resolveKey, descriptor: opts.descriptor, authorizeLogKey: opts.authorizeLogKey };
+    const st = verifyStatement({ statement: pub.statement, cosignatures: [] }, vopts);
     if (!st.ok || !st.payload || !st.hash) throw new Error(`witness refuses: ${st.problems.join("; ")}`);
     const p = st.payload;
     const slot = `${p.log} ${p.period}`;
@@ -451,7 +565,7 @@ export class Witness {
         let hash = last.hash;
         let period = last.period;
         for (const h of opts.history ?? []) {
-          const hs = verifyStatement({ statement: h.statement, cosignatures: [] }, { resolveKey: opts.resolveKey, descriptor: opts.descriptor });
+          const hs = verifyStatement({ statement: h.statement, cosignatures: [] }, vopts);
           if (!hs.ok || !hs.payload || !hs.hash) throw new Error("witness refuses: a history statement does not verify");
           if (hs.payload.log !== p.log || hs.payload.previous !== hash || hs.payload.period !== nextPeriod(period)) {
             throw new Error("witness refuses: history does not chain to the last cosigned payload");
@@ -466,6 +580,7 @@ export class Witness {
       if (opts.files) {
         const lines = parseFileBody(opts.files.lines);
         const b = buildBatch(lines);
+        if (b.period !== null && b.period !== p.period) throw new Error("witness refuses: the lines are for another period");
         if (b.root !== p.root || b.size !== p.size || canonicalizeStrict(b.totals) !== canonicalizeStrict(p.totals)) {
           throw new Error("witness refuses: lines do not reproduce root, size and totals");
         }
@@ -493,15 +608,16 @@ export interface FundView {
   exactTransfer(tx: string): { token: string; to: string; value: bigint } | undefined;
   /** The increase in `totalClaimed` that claim transaction `tx` made on `channelId`, with that channel's config. */
   claimIncrease(tx: string, channelId: string): { receiver: string; receiverAuthorizer: string; token: string; increase: bigint } | undefined;
-  /** A processor-mode payout the fund received. */
-  payout?(reference: string): { asset: string; amount: bigint } | undefined;
+  /** A processor-mode payout the fund received from `log` under `reference`. */
+  payout?(reference: string, log: string): { asset: string; amount: bigint } | undefined;
 }
 
 /**
  * A fund that cosigns a statement attests, for every totals row that names it,
  * that each settlement reference listed for it exists and is credited to it,
- * that no other log it has cosigned lists the same reference, and that the
- * amounts add up to the row.
+ * that across every statement it has cosigned (any log, this log's earlier
+ * periods included) the amounts listed for one reference never add up to more
+ * than that reference credited to it, and that the amounts add up to the row.
  */
 export class FundCosigner {
   readonly fund: string;
@@ -519,8 +635,8 @@ export class FundCosigner {
     this.logAuthorizers = new Map(Object.entries(opts.logAuthorizers ?? {}));
   }
 
-  cosign(pub: PublishedStatement, settlementsBody: string, opts: { resolveKey: KeyResolver; descriptor?: Pick<LogDescriptor, "keys" | "log"> }): JwsEnvelope {
-    const st = verifyStatement({ statement: pub.statement, cosignatures: [] }, opts);
+  cosign(pub: PublishedStatement, settlementsBody: string, opts: Omit<VerifyOptions, "requireCosigners">): JwsEnvelope {
+    const st = verifyStatement({ statement: pub.statement, cosignatures: [] }, { resolveKey: opts.resolveKey, descriptor: opts.descriptor, authorizeLogKey: opts.authorizeLogKey });
     if (!st.ok || !st.payload) throw new Error(`fund refuses: ${st.problems.join("; ")}`);
     const p = st.payload;
     const slot = `${p.log} ${p.period}`;
@@ -538,21 +654,33 @@ export class FundCosigner {
     } catch {
       fundAddr = undefined;
     }
-    const pending = new Map<string, bigint>();
-    for (const row of p.totals.filter((t) => t.fund === this.fund)) {
+    // Refs are canonical here (parseSettlement rejects any other spelling), and the payload's
+    // totals rows are in canonical form (decodeStatement checks), so string keys are exact.
+    const mine = (x: { fund: string }) => sameAccount(x.fund, this.fund);
+    const rows = p.totals.filter(mine);
+    for (const e of entries.filter(mine)) {
+      if (!rows.some((r) => r.asset === e.asset)) throw new Error(`fund refuses: ${e.ref} is listed for ${e.asset}, which has no totals row`);
+    }
+    // Payout references are the processor's own, so they are keyed by log; transfers and claims are global.
+    const keyOf = (ref: string) => (ref.startsWith("payout:") ? `${p.log} ${ref}` : ref);
+    const pending = new Map<string, bigint>(); // what this statement lists per reference
+    for (const row of rows) {
       let sum = 0n;
-      for (const e of entries.filter((x) => x.fund === row.fund && x.asset === row.asset)) {
+      for (const e of entries.filter((x) => mine(x) && x.asset === row.asset)) {
         const amt = BigInt(e.amount);
         sum += amt;
-        const prior = this.refs.get(e.ref);
+        const key = keyOf(e.ref);
+        const prior = this.refs.get(key);
         if (prior && prior.log !== p.log) throw new Error(`fund refuses: ${e.ref} is already listed by another log`);
+        // Everything listed for this reference before: earlier statements of this log, and this one so far.
+        const usedBefore = (prior?.used ?? 0n) + (pending.get(key) ?? 0n);
         const [kind, ...rest] = e.ref.split(":");
         if (kind === "exact") {
           const t = this.view.exactTransfer(rest.join(":"));
           if (!t || !fundAddr || t.to.toLowerCase() !== fundAddr || canonicalAccount(t.token) !== row.asset || t.value !== amt) {
             throw new Error(`fund refuses: ${e.ref} is not a transfer of ${e.amount} to the fund`);
           }
-          if (prior) throw new Error(`fund refuses: ${e.ref} listed twice`);
+          if (usedBefore > 0n) throw new Error(`fund refuses: ${e.ref} listed twice`);
         } else if (kind === "claim") {
           const [tx, channelId] = rest;
           const c = this.view.claimIncrease(tx, channelId);
@@ -560,19 +688,19 @@ export class FundCosigner {
           if (!c || !fundAddr || c.receiver.toLowerCase() !== fundAddr || canonicalAccount(c.token) !== row.asset || !auth || c.receiverAuthorizer.toLowerCase() !== auth.toLowerCase()) {
             throw new Error(`fund refuses: ${e.ref} is not a claim on a channel paying the fund under this log`);
           }
-          const used = (prior?.used ?? 0n) + (pending.get(e.ref) ?? 0n) + amt;
-          if (used > c.increase) throw new Error(`fund refuses: ${e.ref} attributes more than the claim's increase`);
-          pending.set(e.ref, (pending.get(e.ref) ?? 0n) + amt);
+          if (usedBefore + amt > c.increase) throw new Error(`fund refuses: ${e.ref} attributes more than the claim's increase`);
         } else if (kind === "payout") {
-          const r = this.view.payout?.(rest.join(":"));
+          const r = this.view.payout?.(rest.join(":"), p.log);
           if (!r || canonicalAccount(r.asset) !== row.asset || r.amount !== amt) throw new Error(`fund refuses: payout ${e.ref} not found`);
-          if (prior) throw new Error(`fund refuses: ${e.ref} listed twice`);
+          if (usedBefore > 0n) throw new Error(`fund refuses: ${e.ref} listed twice`);
+        } else {
+          throw new Error(`fund refuses: ${e.ref} is not a known kind of reference`);
         }
-        if (kind !== "claim") pending.set(e.ref, amt);
+        pending.set(key, (pending.get(key) ?? 0n) + amt);
       }
       if (sum !== BigInt(row.amount)) throw new Error(`fund refuses: settlements for ${row.asset} do not add up to the totals row`);
     }
-    for (const [ref, amt] of pending) this.refs.set(ref, { log: p.log, used: (this.refs.get(ref)?.used ?? 0n) + amt });
+    for (const [key, amt] of pending) this.refs.set(key, { log: p.log, used: (this.refs.get(key)?.used ?? 0n) + amt });
     const envelope: JwsEnvelope = { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
     this.done.set(slot, { hash: st.hash as string, envelope });
     return envelope;

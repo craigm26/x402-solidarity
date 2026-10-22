@@ -15,7 +15,7 @@ test("share arithmetic matches the conformance vectors", () => {
   for (const c of shares.cases) {
     if (c.fn === "shareMax") assert.equal(shareMax(c.purchase, c.rate, c.capLeft ?? undefined).toString(), c.expected, JSON.stringify(c));
     if (c.fn === "recordedShare") assert.equal(recordedShare(c.signed, c.basis, c.rate).toString(), c.expected, JSON.stringify(c));
-    if (c.fn === "netCredit") assert.equal(netCredit(c.refunded, c.rate, c.originalShare).toString(), c.expected, JSON.stringify(c));
+    if (c.fn === "netCredit") assert.equal(netCredit(c.refunded, c.rate, c.share, c.alreadyCredited).toString(), c.expected, JSON.stringify(c));
   }
   for (const r of shares.rates) assert.equal(isValidRate(r.rate), r.valid, r.rate);
 });

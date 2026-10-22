@@ -26,6 +26,7 @@ export class LogBook {
   private readonly settlements = new Map<string, string[]>();
   private readonly closed = new Map<string, ClosedPeriod>();
   private last: { period: string; hash: string } | undefined;
+  private earliest: string | undefined;
 
   constructor(descriptor: LogDescriptor, key: SigningKey) {
     this.descriptor = descriptor;
@@ -37,6 +38,18 @@ export class LogBook {
     const list = this.settlements.get(period) ?? [];
     list.push(entry);
     this.settlements.set(period, list);
+    this.markActive(period);
+  }
+
+  /**
+   * Note that `period` holds a share (recorded, pending or collected). Before
+   * its first statement the log may not close a later period, or the shares
+   * in this one could never be published: `previous` is null only for the
+   * log's first period, and every period after it is closed in order.
+   */
+  markActive(period: string): void {
+    if (this.closed.has(period)) throw new Error(`period ${period} is closed; a batch is never edited`);
+    if (!this.last && (this.earliest === undefined || period < this.earliest)) this.earliest = period;
   }
 
   get lastClosed(): { period: string; hash: string } | undefined {
@@ -60,6 +73,7 @@ export class LogBook {
   close(period: string, lines: string[], issuedAt?: number): PublishedStatement {
     if (this.closed.has(period)) throw new Error(`${period} is already closed`);
     if (this.last && period !== nextPeriod(this.last.period)) throw new Error(`the next statement must be for ${nextPeriod(this.last.period)}`);
+    if (!this.last && this.earliest !== undefined && period > this.earliest) throw new Error(`the first statement must be for ${this.earliest} or earlier`);
     const batch = buildBatch(lines);
     if (batch.period !== null && batch.period !== period) throw new Error("lines are for another period");
     const entries = this.settlements.get(period) ?? [];

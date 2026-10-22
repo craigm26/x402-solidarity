@@ -72,7 +72,6 @@ export async function runOfflineDemo(opts: { quiet?: boolean } = {}): Promise<De
       { network: NET, asset: USDC.toLowerCase(), scheme: "batch-settlement", maxTimeoutSeconds: 60, extra: { receiverAuthorizer: authorizer.address, withdrawDelay: 86400, name: "USDC", version: "2" } },
       { network: NET, asset: USDC.toLowerCase(), scheme: "exact", maxTimeoutSeconds: 60, minAmount: "10000", extra: { name: "USDC", version: "2" } },
     ],
-    minWithdrawDelay: 86400,
     keys: [{ kid: logKey.kid, from: "2026-12", until: null }],
     witnesses: ["did:web:witness.example"],
   };
@@ -137,7 +136,7 @@ export async function runOfflineDemo(opts: { quiet?: boolean } = {}): Promise<De
   // 5. A failed purchase: no purchase, no share. The exact share it carried was counted when signed.
   chain.now += 10;
   const failed = await buy("failed", "20000000", {}, true);
-  chain.now += 120; // past the share's validBefore
+  chain.now += 180; // past the share's validBefore (the purchase's plus 60 seconds)
   const failedNonce = (failed.decision.attached ? ((failed.decision.info.payment?.payload as unknown as S.ExactEip3009Payload).authorization.nonce) : "0x") as string;
   const released = counter.release(ids.failed, { now: chain.now, executed: chain.authorizationState(USDC, agent.address, failedNonce) });
   say(`5. Failed purchase share released from the cap counter: ${released}`);

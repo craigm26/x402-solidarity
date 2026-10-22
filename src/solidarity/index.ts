@@ -99,6 +99,7 @@ export { buildTree, merkleRoot, verifyInclusion, leafHash, nodeHash, EMPTY_ROOT_
 
 export {
   generateShareId,
+  shareNonce,
   isValidShareId,
   isValidRate,
   applyRate,
@@ -125,6 +126,7 @@ export {
   shareKindsFor,
   openClientChannel,
   applyOutcomeToChannel,
+  resyncChannel,
   processorConstraint,
   mayAttachShare,
 } from "./client.ts";
@@ -136,7 +138,7 @@ export { isSolidarityExtension, validateSolidarity, validateOutcome, extractSoli
 export type { LogChain, SettledResult, SolidarityLogOptions } from "./facilitator.ts";
 export { SolidarityLog, purchaseBasis, withOutcome, decodeExtensionResponses } from "./facilitator.ts";
 
-export type { SigningKey, KeyResolver, FundView, StatementCheck, ReceiptCheck, Batch } from "./ledger.ts";
+export type { SigningKey, KeyResolver, VerifyOptions, FundView, StatementCheck, ReceiptCheck, Batch } from "./ledger.ts";
 export {
   formatLine,
   parseLine,
@@ -145,12 +147,14 @@ export {
   parseFileBody,
   formatSettlement,
   parseSettlement,
+  canonicalRef,
   settlementsMatchTotals,
   statementPayload,
   statementBytes,
   statementHash,
   signStatement,
   decodeStatement,
+  statementProblems,
   verifyStatement,
   verifyChain,
   buildReceipt,
@@ -164,6 +168,8 @@ export {
   generateSigningKey,
   staticResolver,
   keyCoversPeriod,
+  didWebHost,
+  kidOnLogHost,
   sha256Hex,
   Witness,
   FundCosigner,

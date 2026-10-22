@@ -121,6 +121,9 @@ export async function verifyEip3009Signature(requirements: PaymentRequirements, 
   }
 }
 
+/** A base-10 integer string that fits in `bits` unsigned bits. */
+const uintString = (v: unknown, bits: number): v is string => typeof v === "string" && /^(0|[1-9][0-9]{0,77})$/.test(v) && BigInt(v) < 1n << BigInt(bits);
+
 export function isExactEip3009Payload(p: unknown): p is ExactEip3009Payload {
   const x = p as ExactEip3009Payload;
   const a = x?.authorization;
@@ -130,7 +133,7 @@ export function isExactEip3009Payload(p: unknown): p is ExactEip3009Payload {
     typeof a === "object" &&
     a !== null &&
     [a.from, a.to].every((v) => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v)) &&
-    [a.value, a.validAfter, a.validBefore].every((v) => typeof v === "string" && /^[0-9]+$/.test(v)) &&
+    [a.value, a.validAfter, a.validBefore].every((v) => uintString(v, 256)) &&
     typeof a.nonce === "string" &&
     /^0x[0-9a-fA-F]{64}$/.test(a.nonce)
   );
@@ -212,6 +215,11 @@ export async function verifyVoucherSignature(config: ChannelConfig, voucher: Vou
   }
 }
 
+/**
+ * Shape check for a batch-settlement voucher payload, with every number in
+ * the range its EIP-712 type allows (withdrawDelay is uint40,
+ * maxClaimableAmount uint128), so hashing it can never throw.
+ */
 export function isBatchVoucherPayload(p: unknown): p is BatchVoucherPayload {
   const x = p as BatchVoucherPayload;
   const c = x?.channelConfig;
@@ -221,15 +229,17 @@ export function isBatchVoucherPayload(p: unknown): p is BatchVoucherPayload {
     typeof c === "object" &&
     c !== null &&
     [c.payer, c.payerAuthorizer, c.receiver, c.receiverAuthorizer, c.token].every((a) => typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a)) &&
-    Number.isInteger(c.withdrawDelay) &&
+    Number.isSafeInteger(c.withdrawDelay) &&
+    c.withdrawDelay >= 0 &&
+    c.withdrawDelay < 2 ** 40 &&
     typeof c.salt === "string" &&
     /^0x[0-9a-fA-F]{64}$/.test(c.salt) &&
     typeof v === "object" &&
     v !== null &&
     typeof v.channelId === "string" &&
     /^0x[0-9a-fA-F]{64}$/.test(v.channelId) &&
-    typeof v.maxClaimableAmount === "string" &&
-    /^[0-9]+$/.test(v.maxClaimableAmount) &&
-    typeof v.signature === "string"
+    uintString(v.maxClaimableAmount, 128) &&
+    typeof v.signature === "string" &&
+    /^0x[0-9a-fA-F]+$/.test(v.signature)
   );
 }

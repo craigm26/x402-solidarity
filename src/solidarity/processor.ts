@@ -33,7 +33,6 @@ interface ProcessorShare {
   fund: string;
   asset: string;
   amount: bigint;
-  original: bigint;
   refunded: bigint;
   credited: bigint;
   committedIn: string;
@@ -50,9 +49,7 @@ export class ProcessorHolder {
   private readonly payouts: Array<{ period: string; fund: string; asset: string; reference: string; amount: bigint }> = [];
 
   constructor(opts: { descriptor: LogDescriptor; key: SigningKey; clock?: () => number }) {
-    if (opts.descriptor.accepts || opts.descriptor.minWithdrawDelay !== undefined) {
-      throw new Error("a processor-mode descriptor omits accepts and minWithdrawDelay");
-    }
+    if (opts.descriptor.accepts) throw new Error("a processor-mode descriptor omits accepts");
     this.book = new LogBook(opts.descriptor, opts.key);
     this.clock = opts.clock ?? (() => Math.floor(Date.now() / 1000));
   }
@@ -81,7 +78,6 @@ export class ProcessorHolder {
     let share = applyRate(p.amount, o.policy.rate);
     const left = o.counter.left(period);
     if (share > left) share = left;
-    const original = share;
     // net credits lower later shares; they never produce a zero or negative line.
     o.credits = o.credits.filter((c) => c.lapsesAfter >= period && c.amount > 0n);
     for (const c of o.credits) {
@@ -92,18 +88,19 @@ export class ProcessorHolder {
     if (share <= 0n) return undefined;
     const id = generateShareId();
     o.counter.commit({ id, amount: share, period, kind: "processor" });
-    this.shares.set(id, { id, owner: p.owner, purchaseId: p.purchaseId, fund: o.policy.fund, asset: p.asset, amount: share, original, refunded: 0n, credited: 0n, committedIn: period });
+    this.shares.set(id, { id, owner: p.owner, purchaseId: p.purchaseId, fund: o.policy.fund, asset: p.asset, amount: share, refunded: 0n, credited: 0n, committedIn: period });
     this.byPurchase.set(p.purchaseId, id);
     return id;
   }
 
   /**
    * A purchase that carried a share was refunded (in whole or in part). Under
-   * `keep` nothing happens. Under `net` the owner gets a credit of
-   * floor(refunded x rate), never more than the original share, usable in this
-   * period or the next and then lapsed. Partial refunds are summed per
-   * purchase before the floor, so several partial refunds credit exactly what
-   * one refund of the same total would. Nothing is ever paid back, and no
+   * `keep` nothing happens. Under `net` the owner gets a credit, counted per
+   * purchase: the credits for one purchase never add up to more than
+   * min(floor(total refunded x rate), the share recorded for it), so several
+   * partial refunds credit exactly what one refund of the same total would.
+   * A credit is usable in the refund's period and the next, wherever the
+   * purchase's batch was, and then lapses. Nothing is ever paid back, and no
    * closed batch changes.
    */
   refund(p: { purchaseId: string; refunded: string }): { credit: bigint; lapsesAfter?: string } {
@@ -113,7 +110,7 @@ export class ProcessorHolder {
     const o = this.owners.get(s.owner) as Owner;
     if ((o.policy.refunds ?? "keep") === "keep") return { credit: 0n };
     s.refunded += BigInt(p.refunded);
-    const credit = netCredit(s.refunded, o.policy.rate, s.original) - s.credited;
+    const credit = netCredit(s.refunded, o.policy.rate, s.amount, s.credited);
     if (credit <= 0n) return { credit: 0n };
     s.credited += credit;
     const lapsesAfter = nextPeriod(periodOf(this.clock()));
@@ -157,9 +154,11 @@ export class ProcessorHolder {
         perFund.set(key, (perFund.get(key) ?? 0n) + s.amount);
       }
     }
+    // Payout references must be unique among the logs paying a fund, so they start with this log's host.
+    const host = new URL(this.book.descriptor.log).host;
     for (const [key, amount] of perFund) {
       const [fund, asset] = key.split("|");
-      const reference = `${period}-${this.payouts.length + 1}`;
+      const reference = `${host}/${period}/${this.payouts.length + 1}`;
       this.payouts.push({ period, fund, asset, reference, amount });
       this.book.addSettlement(period, formatSettlement({ fund, asset, ref: `payout:${reference}`, amount }));
     }

@@ -96,22 +96,49 @@
       "fn": "netCredit",
       "refunded": "1000",
       "rate": "0.01",
-      "originalShare": "48",
+      "share": "48",
+      "alreadyCredited": "0",
       "expected": "10"
     },
     {
       "fn": "netCredit",
       "refunded": "48000000",
       "rate": "0.001",
-      "originalShare": "48000",
+      "share": "48000",
+      "alreadyCredited": "0",
       "expected": "48000"
     },
     {
       "fn": "netCredit",
       "refunded": "99999999",
       "rate": "0.001",
-      "originalShare": "48000",
+      "share": "48000",
+      "alreadyCredited": "0",
       "expected": "48000"
+    },
+    {
+      "fn": "netCredit",
+      "refunded": "500000",
+      "rate": "0.001",
+      "share": "100",
+      "alreadyCredited": "0",
+      "expected": "100"
+    },
+    {
+      "fn": "netCredit",
+      "refunded": "1000000",
+      "rate": "0.001",
+      "share": "100",
+      "alreadyCredited": "100",
+      "expected": "0"
+    },
+    {
+      "fn": "netCredit",
+      "refunded": "1500",
+      "rate": "0.001",
+      "share": "48000",
+      "alreadyCredited": "1",
+      "expected": "0"
     }
   ],
   "rates": [

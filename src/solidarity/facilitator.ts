@@ -10,6 +10,8 @@
  *   seller in EXTENSION-RESPONSES. Core SettleResponse fields never change.
  * - The log decides from checks it can make at once; an accepted `exact`
  *   share's transfer is submitted afterwards (`followUp`).
+ * - `onSettled` is total: whatever is wrong with a share, it returns the
+ *   purchase's SettleResponse with its core fields unchanged.
  * - Refunds: `keep` only in separate mode. Refund settles never trigger a
  *   share and never adjust one (`onPurchaseRefund`).
  * - Month close: claims, the batch, the settlements file and a JCS statement
@@ -18,6 +20,7 @@
 
 import { getAddress } from "viem";
 import { MAX_WITHDRAW_DELAY, MIN_WITHDRAW_DELAY, VALID_BEFORE_BUFFER_SECONDS } from "./constants.ts";
+import { canonicalize } from "./jcs.ts";
 import type { BatchVoucherPayload, ExactEip3009Payload, VoucherFields } from "./evm.ts";
 import { computeChannelId, isBatchVoucherPayload, isExactEip3009Payload, verifyEip3009Signature, verifyVoucherSignature } from "./evm.ts";
 import type { SigningKey } from "./ledger.ts";
@@ -54,6 +57,7 @@ import {
   periodOf,
   periodStart,
   sameAccount,
+  shareNonce,
 } from "./utils.ts";
 
 /** What the log needs from the chain. The offline simulation implements it; so would an RPC-backed one. */
@@ -161,9 +165,42 @@ export class SolidarityLog {
    * send, with the solidarity outcome added when the payload carried a share.
    */
   async onSettled(paymentPayload: PaymentPayload, requirements: PaymentRequirements, settleResponse: SettleResponse): Promise<SettledResult> {
-    const info = extractSolidarity(paymentPayload);
+    let info: SolidarityInfo | undefined;
+    try {
+      info = extractSolidarity(paymentPayload);
+    } catch {
+      info = undefined;
+    }
     if (!info || info.payment === undefined) return { settleResponse, followUp: Promise.resolve() };
 
+    let outcome: SolidarityOutcome;
+    let followUp: Promise<void> = Promise.resolve();
+    const base = this.baseOutcome(info);
+    try {
+      const r = await this.decide(info, paymentPayload, requirements, settleResponse);
+      outcome = r.outcome;
+      followUp = r.followUp;
+    } catch {
+      // A share never blocks or changes the purchase: anything unexpected about it is a
+      // malformed share, and the purchase's response goes back with its core fields intact.
+      outcome = { ...base, status: "skipped", reason: "bad-payment" };
+    }
+
+    const out = withOutcome(settleResponse, outcome);
+    return {
+      settleResponse: out,
+      outcome,
+      extensionResponses: Buffer.from(JSON.stringify({ [SOLIDARITY]: { status: outcome.status } })).toString("base64"),
+      followUp,
+    };
+  }
+
+  private async decide(
+    info: SolidarityInfo,
+    paymentPayload: PaymentPayload,
+    requirements: PaymentRequirements,
+    settleResponse: SettleResponse,
+  ): Promise<{ outcome: SolidarityOutcome; followUp: Promise<void> }> {
     let outcome: SolidarityOutcome;
     let followUp: Promise<void> = Promise.resolve();
     const base = this.baseOutcome(info);
@@ -191,14 +228,7 @@ export class SolidarityLog {
       outcome = r.outcome;
       followUp = r.followUp;
     }
-
-    const out = withOutcome(settleResponse, outcome);
-    return {
-      settleResponse: out,
-      outcome,
-      extensionResponses: Buffer.from(JSON.stringify({ [SOLIDARITY]: { status: outcome.status } })).toString("base64"),
-      followUp,
-    };
+    return { outcome, followUp };
   }
 
   /**
@@ -213,16 +243,20 @@ export class SolidarityLog {
     this.reserved.delete(p.id);
     const info = extractSolidarity(p.paymentPayload) as SolidarityInfo;
     if (!confirmed) return { outcome: { ...this.baseOutcome(info), status: "skipped", reason: "purchase-not-final" }, followUp: Promise.resolve() };
-    const sr = finalResponse ?? { ...p.settleResponse, success: true, errorReason: undefined };
-    const basis = purchaseBasis(p.paymentPayload, p.requirements, sr);
-    if (!basis.ok) return { outcome: { ...this.baseOutcome(info), status: "skipped", reason: "purchase-not-supported" }, followUp: Promise.resolve() };
-    return this.process(info, p.paymentPayload, p.requirements, basis.basis);
+    try {
+      const sr = finalResponse ?? { ...p.settleResponse, success: true, errorReason: undefined };
+      const basis = purchaseBasis(p.paymentPayload, p.requirements, sr);
+      if (!basis.ok) return { outcome: { ...this.baseOutcome(info), status: "skipped", reason: "purchase-not-supported" }, followUp: Promise.resolve() };
+      return await this.process(info, p.paymentPayload, p.requirements, basis.basis);
+    } catch {
+      return { outcome: { ...this.baseOutcome(info), status: "skipped", reason: "bad-payment" }, followUp: Promise.resolve() };
+    }
   }
 
   /**
    * Refunds never adjust a share in separate mode: a share is a final gift
-   * (`keep`), refunds are settles the server writes, and a closed batch is
-   * never edited. Returned for the caller's records.
+   * (`keep`), the client has no reliable way to learn of a refund, and a
+   * closed batch is never edited. Returned for the caller's records.
    */
   onPurchaseRefund(_refund: { transaction?: string; amount?: string }): { adjusted: false; rule: "keep" } {
     return { adjusted: false, rule: "keep" };
@@ -328,6 +362,11 @@ export class SolidarityLog {
     if (!entry || (kind !== "exact" && kind !== "batch-settlement")) throw new Skip("kind-not-supported");
     if (kind === "exact" && purchase.scheme !== "exact") throw new Skip("kind-not-supported", "exact share needs an exact purchase");
 
+    // `accepted.maxTimeoutSeconds` and `accepted.extra` equal that descriptor entry's.
+    if (accepted.maxTimeoutSeconds !== entry.maxTimeoutSeconds || !sameExtra(accepted.extra, entry.extra)) {
+      throw new Skip("bad-payment", "terms differ from the descriptor entry");
+    }
+
     // `rate` is at most 0.01.
     if (typeof info.rate !== "string" || !RATE_PATTERN.test(info.rate)) {
       if (isDecimal(info.rate) && compareDecimal(info.rate, "0.01") > 0) throw new Skip("over-rate");
@@ -353,26 +392,29 @@ export class SolidarityLog {
     if (kind === "exact") {
       const p = payment.payload;
       if (!isExactEip3009Payload(p)) throw new Skip("bad-payment", "not an EIP-3009 payload");
-      const extra = { ...(entry.extra ?? {}), ...(accepted.extra ?? {}) };
-      if (entry.extra && (extra.name !== entry.extra.name || extra.version !== entry.extra.version)) throw new Skip("bad-payment", "EIP-712 domain");
       if (!sameAccount(p.authorization.to, accepted.payTo)) throw new Skip("bad-payment", "authorization.to");
       if (BigInt(p.authorization.value) !== BigInt(accepted.amount)) throw new Skip("bad-payment", "authorization.value");
+      // The nonce binds the id, so a relaying seller cannot record the share under another id.
+      if (p.authorization.nonce.toLowerCase() !== shareNonce(info.id)) throw new Skip("bad-payment", "nonce does not match the id");
       if (BigInt(p.authorization.validAfter) > BigInt(now)) throw new Skip("bad-payment", "validAfter in the future");
       if (BigInt(p.authorization.validBefore) < BigInt(now + VALID_BEFORE_BUFFER_SECONDS)) throw new Skip("bad-payment", "validBefore passed");
-      if (!(await verifyEip3009Signature({ ...accepted, extra }, p))) throw new Skip("bad-payment", "signature");
+      // The EIP-712 domain comes from the descriptor entry's extra (checked equal above).
+      if (!(await verifyEip3009Signature({ ...accepted, extra: entry.extra }, p))) throw new Skip("bad-payment", "signature");
     } else {
       const p = payment.payload;
       if (!isBatchVoucherPayload(p)) throw new Skip("bad-payment", "not a voucher payload");
       const c = p.channelConfig;
       const cid = p.voucher.channelId.toLowerCase();
+      // The binding's verification rules 1 to 5, against the descriptor entry. The delay is
+      // checked first so no out-of-range value ever reaches the EIP-712 hash.
+      if (c.withdrawDelay !== entry.extra?.withdrawDelay || c.withdrawDelay < MIN_WITHDRAW_DELAY || c.withdrawDelay > MAX_WITHDRAW_DELAY) {
+        throw new Skip("bad-payment", "withdrawDelay");
+      }
       if (computeChannelId(c, accepted.network).toLowerCase() !== cid) throw new Skip("bad-payment", "channel id");
       if (!sameAccount(c.receiver, accepted.payTo)) throw new Skip("bad-payment", "receiver is not the fund");
       const auth = entry.extra?.receiverAuthorizer;
       if (typeof auth !== "string" || !sameAccount(c.receiverAuthorizer, auth)) throw new Skip("bad-payment", "receiverAuthorizer");
       if (!sameAccount(c.token, accepted.asset)) throw new Skip("bad-payment", "token");
-      if (c.withdrawDelay < (d.minWithdrawDelay ?? MIN_WITHDRAW_DELAY) || c.withdrawDelay < MIN_WITHDRAW_DELAY || c.withdrawDelay > MAX_WITHDRAW_DELAY) {
-        throw new Skip("bad-payment", "withdrawDelay");
-      }
       if (!(await verifyVoucherSignature(c, p.voucher, accepted.network))) throw new Skip("bad-payment", "voucher signature");
       const state = this.chain.channelState(cid);
       if (!state || state.balance === 0n) throw new Skip("bad-payment", "channel not found");
@@ -401,6 +443,7 @@ export class SolidarityLog {
     const id = info.id as string;
     const line = formatLine({ period, fund: c.fund, asset: c.asset, id, amount: c.amount });
     const rec: ShareRecord = { id, kind: c.kind, period, fund: c.fund, asset: c.asset, amount: c.amount, state: "queued", line };
+    this.book.markActive(period);
     if (c.kind === "exact") {
       rec.exact = { accepted: (info.payment as NonNullable<SolidarityInfo["payment"]>).accepted, payload: (info.payment as NonNullable<SolidarityInfo["payment"]>).payload as unknown as ExactEip3009Payload };
     } else {
@@ -424,7 +467,7 @@ export class SolidarityLog {
     const state = this.chain.channelState(cid);
     const known = this.channels.get(cid);
     if (!state && !known) return undefined;
-    return {
+    const snap: ChannelSnapshot = {
       channelId: cid,
       balance: (state?.balance ?? 0n).toString(),
       totalClaimed: (state?.totalClaimed ?? 0n).toString(),
@@ -432,6 +475,13 @@ export class SolidarityLog {
       refundNonce: (state?.refundNonce ?? 0n).toString(),
       chargedCumulativeAmount: (known?.charged ?? state?.totalClaimed ?? 0n).toString(),
     };
+    // The last voucher the log holds, so a client can resync after a cumulative-mismatch
+    // (the binding's Corrective 402 carries the same pair in extra.voucherState).
+    if (known?.latestVoucher) {
+      snap.signedMaxClaimable = known.latestVoucher.maxClaimableAmount;
+      snap.signature = known.latestVoucher.signature;
+    }
+    return snap;
   }
 
   private async submitExact(rec: ShareRecord): Promise<void> {
@@ -443,8 +493,8 @@ export class SolidarityLog {
         rec.state = "collected";
         this.addSettlement(rec.period, formatSettlement({ fund: rec.fund, asset: rec.asset, ref: `exact:${r.transaction}`, amount: rec.amount }));
       } else {
-        // Spec choice: "uncollected" is defined for batch-settlement only; an accepted exact
-        // share whose transfer fails is treated the same way (left out of the batch).
+        // "An accepted exact share whose transfer fails (it expired, it was cancelled, or the
+        // payer's balance was too low) is uncollected."
         ex.error = r.error;
         rec.state = "uncollected";
       }
@@ -461,10 +511,12 @@ export class SolidarityLog {
   // ---- batch-settlement claims -------------------------------------------------
 
   /**
-   * Claim every channel's outstanding share vouchers, up to the charged
-   * cumulative amount the log has recorded. Each increase in totalClaimed is
-   * attributed to the periods of the shares it covers; a claim that covers two
-   * periods is split. Shares the channel can no longer pay are uncollected.
+   * Claim every channel's outstanding share vouchers, up to a charged
+   * cumulative amount the log has recorded. Each share is attributed its own
+   * amount in its own period; a claim that covers two periods is split. A
+   * claim that fails while the channel can pay is retried later (its shares
+   * stay queued). Shares the channel can no longer pay are uncollected, and
+   * the log lowers its charged cumulative amount to what it can still collect.
    */
   async claimOutstanding(only?: string): Promise<void> {
     for (const cr of this.channels.values()) {
@@ -479,29 +531,42 @@ export class SolidarityLog {
   }
 
   private async claimChannel(cr: ChannelRecord): Promise<void> {
-    if (cr.charged <= cr.claimedByLog || !cr.latestVoucher) return;
+    const queued = cr.shares.map((id) => this.shares.get(id) as ShareRecord).filter((r) => r.state === "queued");
+    if (queued.length === 0 || !cr.latestVoucher) return;
     const state = this.chain.channelState(cr.channelId);
-    const claimable = state ? state.balance : 0n;
-    // Claim whole shares only, up to what the channel can still pay.
-    let target = cr.claimedByLog;
+    const batchOf = (r: ShareRecord) => r.batch as NonNullable<ShareRecord["batch"]>;
+
+    // An increase in totalClaimed the log did not make (the binding lets the receiver, the
+    // fund, call claim itself) is unattributed: the shares it covers are uncollected.
+    const onChain = state?.totalClaimed ?? 0n;
+    if (onChain > cr.claimedByLog) {
+      for (const rec of queued) if (batchOf(rec).from < onChain) rec.state = "uncollected";
+      cr.claimedByLog = onChain;
+      if (cr.charged < onChain) cr.charged = onChain; // a voucher can only build on what is claimed
+    }
+
+    // Shares the channel can no longer pay are uncollected. They are the last ones in charge
+    // order, so the log lowers its charged amount to the end of what it can still collect and
+    // the client's next voucher resyncs through a cumulative-mismatch.
+    const balance = state ? state.balance : 0n;
     const covered: ShareRecord[] = [];
-    for (const id of cr.shares) {
-      const rec = this.shares.get(id) as ShareRecord;
-      const b = rec.batch as NonNullable<ShareRecord["batch"]>;
-      if (b.to <= cr.claimedByLog || rec.state !== "queued") continue;
-      if (b.to <= claimable && b.from === target) {
-        target = b.to;
-        covered.push(rec);
-      } else {
+    let lost = false;
+    for (const rec of queued) {
+      if (rec.state !== "queued") continue;
+      if (batchOf(rec).to <= balance) covered.push(rec);
+      else {
         rec.state = "uncollected";
+        lost = true;
       }
     }
-    if (target === cr.claimedByLog) return;
+    const target = covered.reduce((t, r) => (batchOf(r).to > t ? batchOf(r).to : t), cr.claimedByLog);
+    if (lost) cr.charged = target;
+    if (covered.length === 0 || target === cr.claimedByLog) return;
+
     const r = await this.chain.claim(cr.channelId, cr.latestVoucher, target);
-    if (!r.ok) {
-      for (const rec of covered) rec.state = "uncollected";
-      return;
-    }
+    // A failed claim on a channel that can still pay is retried at the next claim or at
+    // close; its shares stay queued (closePeriod refuses to close over them).
+    if (!r.ok) return;
     const byPeriod = new Map<string, bigint>();
     for (const rec of covered) {
       rec.state = "collected";
@@ -527,7 +592,7 @@ export class SolidarityLog {
     if (next && period !== next) throw new Error(`the next statement must be for ${next}`);
     await this.claimOutstanding();
     const inPeriod = [...this.shares.values()].filter((s) => s.period === period);
-    if (inPeriod.some((s) => s.state === "queued")) throw new Error(`unresolved shares in ${period}`);
+    if (inPeriod.some((s) => s.state === "queued")) throw new Error(`unresolved shares in ${period} (a claim failed; try again)`);
     // Uncollected shares are removed before the tree is built.
     const lines = inPeriod.filter((s) => s.state === "collected").map((s) => s.line);
     return this.book.close(period, lines, issuedAt ?? Math.max(now, periodStart(nextPeriod(period))));
@@ -547,7 +612,7 @@ export class SolidarityLog {
     const rec = this.shares.get(id);
     if (!rec) {
       const held = [...this.pending.values()].some((p) => p.id === id);
-      return held ? [200, { status: "queued" }] : [404, { error: "not found" }];
+      return held ? [200, { status: "pending" }] : [404, { error: "not found" }];
     }
     if (rec.state === "uncollected") return [200, { status: "uncollected" }];
     return (rec.state === "collected" && this.book.included(rec.period, id)) || [200, { status: "queued" }];
@@ -588,14 +653,19 @@ export function purchaseBasis(
     case "upto":
       if (flow === "authorization") basis = asInt(requirements.amount);
       break;
-    case "batch-settlement":
-      if (ptype === "voucher" || ptype === "deposit") basis = asInt(settleResponse.extra?.chargedAmount);
-      break;
+    // batch-settlement purchases carry no share in draft 2: the server charges each request
+    // itself, often without calling the facilitator, so the log never sees the charge.
     case "auth-capture":
       if (flow === "authorization" && (ptype === undefined || ptype === "charge")) basis = asInt(settleResponse.amount) ?? asInt(requirements.amount);
       break;
   }
   return basis === undefined ? { ok: false } : { ok: true, basis };
+}
+
+/** Two `extra` objects are the same terms: equal JSON, with EVM hex compared case-insensitively. */
+function sameExtra(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+  const norm = (x: Record<string, unknown> | undefined) => JSON.parse(JSON.stringify(x ?? {}), (_k, v) => (typeof v === "string" ? canonicalAccount(v) : v));
+  return canonicalize(norm(a)) === canonicalize(norm(b));
 }
 
 /** A copy of the SettleResponse with the outcome added; core fields are copied untouched. */

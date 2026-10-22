@@ -39,8 +39,10 @@ test("I-JSON: lone surrogates are rejected", () => {
 
 test("strict mode (statements): integers below 2^53 only", () => {
   assert.equal(canonicalizeStrict({ b: 9007199254740991, a: [null, "x"] }), '{"a":[null,"x"],"b":9007199254740991}');
-  assert.throws(() => canonicalizeStrict({ a: 1.5 }), /not an integer/);
-  assert.throws(() => canonicalizeStrict({ a: 2 ** 53 }), /not an integer/);
+  assert.throws(() => canonicalizeStrict({ a: 1.5 }), /non-negative integer/);
+  assert.throws(() => canonicalizeStrict({ a: 2 ** 53 }), /non-negative integer/);
+  assert.throws(() => canonicalizeStrict({ a: -1 }), /non-negative integer/, "statements hold no negative numbers");
+  assert.throws(() => canonicalizeStrict({ a: true }), /booleans/, "nor booleans");
   assert.equal(canonicalize({ a: 1.5 }), '{"a":1.5}');
 });
 

@@ -116,7 +116,11 @@ export class CapCounter {
     return this.left(periodOf(unixSeconds));
   }
 
-  /** Count a share. Throws if it would pass the cap, if the policy is off, or if the id was used. */
+  /**
+   * Count a share. Throws if it would pass the cap, if the policy is off, or if
+   * the id was used. Synchronous, so a caller that reads `left` and commits with
+   * no await in between reserves its room atomically.
+   */
   commit(c: { id: string; amount: bigint; period: string; kind: ShareKind | "processor"; validBefore?: number }): void {
     if (this.off) throw new Error("policy is off");
     if (this.byId.has(c.id)) throw new Error(`share ${c.id} already counted`);
@@ -124,6 +128,18 @@ export class CapCounter {
     if (c.amount > this.left(c.period)) throw new Error("share would pass the cap");
     this.byId.set(c.id, { ...c, released: false });
     this.totals.set(c.period, this.committed(c.period) + c.amount);
+  }
+
+  /**
+   * Undo a commitment whose signing failed, so nothing was signed. Only for
+   * the holder's own failure path, right after `commit`.
+   */
+  abort(id: string): boolean {
+    const c = this.byId.get(id);
+    if (!c || c.released) return false;
+    this.byId.delete(id);
+    this.totals.set(c.period, this.committed(c.period) - c.amount);
+    return true;
   }
 
   /**

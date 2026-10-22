@@ -108,7 +108,12 @@ export interface SolidarityExtension {
   schema: Record<string, unknown>;
 }
 
-/** Channel snapshot returned for batch-settlement shares. */
+/**
+ * Channel snapshot returned for batch-settlement shares. Untrusted: it passes
+ * through the seller unsigned. `signedMaxClaimable` and `signature` are the
+ * last voucher the log holds, for recovery after a cumulative-mismatch (as the
+ * binding's Corrective 402 carries them in `extra.voucherState`).
+ */
 export interface ChannelSnapshot {
   channelId: string;
   balance?: string;
@@ -116,6 +121,8 @@ export interface ChannelSnapshot {
   withdrawRequestedAt?: number;
   refundNonce?: string;
   chargedCumulativeAmount: string;
+  signedMaxClaimable?: string;
+  signature?: string;
 }
 
 /** `SettleResponse.extensions.solidarity.info`. */
@@ -151,7 +158,6 @@ export interface LogDescriptor {
   log: string;
   funds: string[];
   accepts?: DescriptorAccept[];
-  minWithdrawDelay?: number;
   minCollection?: string;
   keys: DescriptorKey[];
   witnesses?: string[];

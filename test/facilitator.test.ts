@@ -19,10 +19,14 @@ test("conformance: every facilitator case gives the expected outcome, in order, 
   const chain = new SimulatedChain({ now: P.now });
   chain.mint(USDC, P.payer.address, 1_000_000_000n);
   assert.equal(chain.deposit(P.channel.config, BigInt(P.channel.deposit)), P.channel.id);
+  for (const m of P.setup.mints) chain.mint(m.token, m.to, BigInt(m.amount));
+  for (const d of P.setup.deposits) assert.equal(chain.deposit(d.config, BigInt(d.amount)), d.id);
   const log = new S.SolidarityLog({ descriptor: DESCRIPTOR, key: S.generateSigningKey("EdDSA", DESCRIPTOR.keys[0].kid), chain, clock: () => P.now });
   for (const c of P.cases) {
     const r = await log.onSettled(c.paymentPayload, c.requirements, c.settleResponse);
     assert.deepEqual(r.outcome ?? null, c.expected, c.name);
+    if (c.want === null) assert.equal(r.outcome, undefined, c.name);
+    else assert.deepEqual([r.outcome?.status, r.outcome?.reason], [c.want.status, c.want.reason], `${c.name}: the hand-written outcome`);
     for (const k of CORE) assert.deepEqual(r.settleResponse[k], c.settleResponse[k], `${c.name}: ${k} changed`);
     if (r.outcome) {
       assert.deepEqual(S.validateOutcome(r.outcome), { valid: true }, c.name);
@@ -85,7 +89,7 @@ test("purchase basis follows the table in the spec", () => {
   assert.deepEqual(S.purchaseBasis(pp(r("exact", "48")), r("exact", "48"), sr), { ok: true, basis: 48n });
   assert.deepEqual(S.purchaseBasis(pp(r("exact", "48", { paymentFlow: "upfront" })), r("exact", "48"), sr), { ok: true, basis: 48n });
   assert.deepEqual(S.purchaseBasis(pp(r("upto", "1000")), r("upto", "400"), sr), { ok: true, basis: 400n }, "settle-time amount");
-  assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "voucher" }), r("batch-settlement", "700"), sr), { ok: true, basis: 650n }, "extra.chargedAmount");
+  assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "voucher" }), r("batch-settlement", "700"), sr), { ok: false }, "batch-settlement purchases carry no share in draft 2");
   assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "refund" }), r("batch-settlement", "700"), sr), { ok: false });
   assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "claim" }), r("batch-settlement", "700"), sr), { ok: false });
   assert.deepEqual(S.purchaseBasis(pp(r("auth-capture", "900", { paymentFlow: "authorization" })), r("auth-capture", "900"), sr), { ok: true, basis: 700n }, "what the charge collected");
@@ -245,7 +249,7 @@ test("a pending purchase that fails drops the share; /proofs answers 404", async
   const info = await w.share(accepted);
   const r = await w.log.onSettled(w.payload(accepted, info), accepted, { success: false, errorReason: "settlement_pending", transaction: "0xp", network: NET });
   assert.equal(r.outcome?.status, "pending");
-  assert.deepEqual(JSON.parse(w.log.handle(`/proofs/${info.id}`).body), { status: "queued" });
+  assert.deepEqual(JSON.parse(w.log.handle(`/proofs/${info.id}`).body), { status: "pending" });
   const res = await w.log.resolvePending("0xp", false);
   assert.equal(res?.outcome.reason, "purchase-not-final");
   assert.equal(w.log.handle(`/proofs/${info.id}`).status, 404);
