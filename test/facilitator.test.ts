@@ -88,6 +88,8 @@ test("purchase basis follows the table in the spec", () => {
   const sr: SettleResponse = { success: true, transaction: "0x1", network: NET, amount: "700", extra: { chargedAmount: "650" } };
   assert.deepEqual(S.purchaseBasis(pp(r("exact", "48")), r("exact", "48"), sr), { ok: true, basis: 48n });
   assert.deepEqual(S.purchaseBasis(pp(r("exact", "48", { paymentFlow: "upfront" })), r("exact", "48"), sr), { ok: true, basis: 48n });
+  assert.deepEqual(S.purchaseBasis(pp(r("exact", "48"), { type: "refund" }), r("exact", "48"), sr), { ok: false }, "a refund payload never carries a share, whatever its scheme");
+  assert.deepEqual(S.purchaseBasis(pp(r("upto", "1000"), { type: "refund" }), r("upto", "400"), sr), { ok: false });
   assert.deepEqual(S.purchaseBasis(pp(r("upto", "1000")), r("upto", "400"), sr), { ok: true, basis: 400n }, "settle-time amount");
   assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "voucher" }), r("batch-settlement", "700"), sr), { ok: false }, "batch-settlement purchases carry no share in draft 2");
   assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "refund" }), r("batch-settlement", "700"), sr), { ok: false });
@@ -170,7 +172,7 @@ test("batch-settlement: one claim split across two periods; the fund attests bot
   assert.deepEqual(S.verifyChain([dec, jan]), { ok: true, problems: [] });
 });
 
-test("batch-settlement: claim on withdrawal; shares a drained channel cannot pay are uncollected", async () => {
+test("batch-settlement: claim on withdrawal, and at once for a share accepted while it is pending", async () => {
   const w = await world();
   w.chain.deposit(w.config, 6_000n);
   const ch = S.openClientChannel(NET, w.config);
@@ -186,21 +188,24 @@ test("batch-settlement: claim on withdrawal; shares a drained channel cannot pay
   w.chain.initiateWithdrawal(ch.channelId);
   await w.log.onWithdrawalInitiated(ch.channelId);
   assert.equal(w.chain.channelState(ch.channelId)?.totalClaimed, 5000n);
-  // Another share arrives, then the withdrawal finalizes before the log claims it.
+  // Another share arrives while the withdrawal is pending: the log claims it at once (followUp),
+  // so the withdrawal cannot finalize past it. (A channel drained before the log could claim is
+  // covered in hardening.test.ts.)
   const accepted = w.req("1000000");
   const info = await w.share(accepted, { kind: "batch-settlement", channel: ch });
   const r = await w.log.onSettled(w.payload(accepted, info), accepted, w.ok());
   assert.equal(r.outcome?.status, "accepted");
+  await r.followUp;
+  assert.equal(w.chain.channelState(ch.channelId)?.totalClaimed, 6000n, "claimed before the delay could elapse");
   w.chain.now += 86400;
   w.chain.finalizeWithdrawal(ch.channelId);
   w.chain.now = Date.UTC(2027, 0, 3) / 1000;
   const st = await w.log.closePeriod("2026-12");
-  assert.equal(w.log.inspect(info.id as string)?.state, "uncollected");
-  assert.deepEqual(JSON.parse(w.log.handle(`/proofs/${info.id}`).body), { status: "uncollected" });
+  assert.equal(w.log.inspect(info.id as string)?.state, "collected");
   const payload = S.decodeStatement(st.statement).payload;
-  assert.equal(payload.size, 2);
-  assert.equal(payload.totals[0].amount, "5000");
-  for (const id of ids) assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "included");
+  assert.equal(payload.size, 3);
+  assert.equal(payload.totals[0].amount, "6000");
+  for (const id of [...ids, info.id as string]) assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "included");
 });
 
 test("per-channel serialization: two concurrent vouchers on one base, one is a cumulative mismatch", async () => {
@@ -253,4 +258,148 @@ test("a pending purchase that fails drops the share; /proofs answers 404", async
   const res = await w.log.resolvePending("0xp", false);
   assert.equal(res?.outcome.reason, "purchase-not-final");
   assert.equal(w.log.handle(`/proofs/${info.id}`).status, 404);
+});
+
+// ---- review of draft 2 -------------------------------------------------------------------
+
+/** Build, send and apply one batch-settlement share on `ch`. */
+async function batchShare(w: Awaited<ReturnType<typeof world>>, ch: S.ClientChannel, amount: string) {
+  const accepted = w.req(amount);
+  const info = await w.share(accepted, { kind: "batch-settlement", channel: ch });
+  const r = await w.log.onSettled(w.payload(accepted, info), accepted, w.ok());
+  const applied = S.applyOutcomeToChannel(ch, r.outcome);
+  return { info, id: info.id as string, outcome: r.outcome, applied };
+}
+
+test("an exact share the seller submitted first is still collected, under the seller's transaction", async () => {
+  const w = await world();
+  const accepted = w.req("48000000");
+  const info = await w.share(accepted);
+  const pay = info.payment as NonNullable<SolidarityInfo["payment"]>;
+  // The seller relays the signed authorization, so it can submit it before the log does.
+  const front = await w.chain.transferWithAuthorization(pay.accepted, pay.payload as unknown as S.ExactEip3009Payload);
+  assert.ok(front.ok);
+  const r = await w.log.onSettled(w.payload(accepted, info), accepted, w.ok());
+  await r.followUp;
+  assert.equal(w.log.inspect(info.id as string)?.state, "collected");
+  w.chain.now = Date.UTC(2027, 0, 3) / 1000;
+  const st = S.decodeStatement((await w.log.closePeriod("2026-12")).statement).payload;
+  assert.deepEqual(st.totals.map((t) => t.amount), ["48000"]);
+  assert.equal(S.parseSettlement(w.log.handle("/settlements/2026-12").body.trim()).ref, `exact:${(front as { transaction: string }).transaction}`);
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${info.id}`).body).status, "included");
+});
+
+test("a claim that keeps failing holds a statement only until the claim grace runs out; then the channel recovers", async () => {
+  const w = await world();
+  w.chain.deposit(w.config, 1_000_000n);
+  const ch = S.openClientChannel(NET, w.config);
+  const s1 = await batchShare(w, ch, "2000000");
+  assert.equal(s1.outcome?.status, "accepted");
+  const exact = await w.share(w.req("48000000"));
+  const re = await w.log.onSettled(w.payload(w.req("48000000"), exact), w.req("48000000"), w.ok());
+  await re.followUp;
+  const real = w.chain.claim.bind(w.chain);
+  w.chain.claim = async () => ({ ok: false as const, error: "reverted" });
+  w.chain.now = Date.UTC(2027, 0, 3) / 1000;
+  await assert.rejects(() => w.log.closePeriod("2026-12"), /try again/, "inside the grace: retry");
+  w.chain.now = Date.UTC(2027, 0, 20) / 1000; // 19 days after December ends, past the 14-day grace
+  const st = S.decodeStatement((await w.log.closePeriod("2026-12")).statement).payload;
+  assert.equal(st.size, 1, "the exact share; the stuck batch share is left out");
+  assert.deepEqual(st.totals.map((t) => t.amount), ["48000"]);
+  assert.deepEqual(JSON.parse(w.log.handle(`/proofs/${s1.id}`).body), { status: "uncollected" });
+  // The channel recovers: the client's next voucher is a cumulative-mismatch, and it resyncs from its own voucher.
+  w.chain.claim = real;
+  const s2 = await batchShare(w, ch, "3000000");
+  assert.equal(s2.outcome?.reason, "cumulative-mismatch");
+  assert.equal(await S.resyncChannel(ch, s2.outcome?.channel), true);
+  assert.equal(ch.chargedCumulativeAmount, "0");
+  const s3 = await batchShare(w, ch, "3000000");
+  assert.equal(s3.outcome?.status, "accepted");
+  assert.equal(s3.outcome?.period, "2027-01");
+  w.chain.now = Date.UTC(2027, 1, 3) / 1000;
+  await w.log.closePeriod("2027-01");
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${s3.id}`).body).status, "included");
+  assert.equal(w.chain.channelState(ch.channelId)?.totalClaimed, 3000n);
+});
+
+test("an upto share that records less leaves no headroom: its voucher cannot be spent again under another id", async () => {
+  const w = await world();
+  w.chain.deposit(w.config, 1_000_000n);
+  const ch = S.openClientChannel(NET, w.config);
+  const upto = w.req("10000000", "upto");
+  const info = await w.share(upto, { kind: "batch-settlement", channel: ch });
+  const r = await w.log.onSettled(w.payload(upto, info), { ...upto, amount: "4000000" }, w.ok({ amount: "4000000" }));
+  assert.equal(r.outcome?.amount, "4000", "recorded on what the settle collected");
+  assert.equal(r.outcome?.channel?.chargedCumulativeAmount, "10000", "the voucher base moves by what was signed");
+  assert.equal(r.outcome?.channel?.signature, undefined, "an accepted outcome carries no voucher");
+  assert.ok(S.applyOutcomeToChannel(ch, r.outcome));
+  assert.equal(ch.chargedCumulativeAmount, "10000");
+  // A junk share naming the channel learns no voucher.
+  const junk = { version: 2, log: "https://elsewhere.example/solidarity", id: S.generateShareId(), rate: "0.001", fund: POLICY.fund, payment: { accepted: { scheme: "batch-settlement" }, payload: { voucher: { channelId: ch.channelId } } } } as unknown as SolidarityInfo;
+  const probe = await w.log.onSettled(w.payload(w.req("1000000"), junk), w.req("1000000"), w.ok());
+  assert.equal(probe.outcome?.reason, "wrong-log");
+  assert.ok(probe.outcome?.channel && probe.outcome.channel.signature === undefined && probe.outcome.channel.signedMaxClaimable === undefined);
+  // The relaying seller holds the owner's voucher anyway. Under an id of its own, at any amount and rate, it fails.
+  const voucher = (info.payment?.payload as unknown as S.BatchVoucherPayload).voucher;
+  const entry = DESCRIPTOR.accepts?.find((a) => a.scheme === "batch-settlement") as NonNullable<LogDescriptor["accepts"]>[number];
+  for (const amount of ["6000", "1"]) {
+    const forged = {
+      version: 2,
+      log: LOG,
+      id: S.generateShareId(),
+      rate: "0.01",
+      fund: POLICY.fund,
+      payment: { accepted: { scheme: "batch-settlement", network: NET, amount, asset: USDC, payTo: FUND_ADDR, maxTimeoutSeconds: entry.maxTimeoutSeconds, extra: { ...entry.extra } }, payload: { type: "voucher", channelConfig: w.config, voucher } },
+    } as unknown as SolidarityInfo;
+    const rf = await w.log.onSettled(w.payload(w.req("1000000"), forged), w.req("1000000"), w.ok());
+    assert.equal(rf.outcome?.reason, "cumulative-mismatch", amount);
+  }
+  // The owner's next share builds on the signed ceiling; claims cover recorded amounts only.
+  const next = await batchShare(w, ch, "2000000");
+  assert.equal((next.info.payment?.payload as unknown as S.BatchVoucherPayload).voucher.maxClaimableAmount, "12000");
+  assert.ok(next.applied);
+  w.chain.now = Date.UTC(2027, 0, 3) / 1000;
+  const st = S.decodeStatement((await w.log.closePeriod("2026-12")).statement).payload;
+  assert.equal(st.size, 2);
+  assert.deepEqual(st.totals.map((t) => t.amount), ["6000"]);
+  assert.equal(w.chain.channelState(ch.channelId)?.totalClaimed, 6000n, "the 6000 the upto share did not record is never claimed");
+});
+
+test("claim boundaries: a share ending exactly at the balance is collected; an outside claim ending exactly at a share's start leaves it collectable", async () => {
+  const w = await world();
+  w.chain.deposit(w.config, 5000n);
+  const ch = S.openClientChannel(NET, w.config);
+  const a = await batchShare(w, ch, "2000000");
+  const b = await batchShare(w, ch, "3000000");
+  await w.log.claimOutstanding();
+  for (const s of [a, b]) assert.equal(w.log.inspect(s.id)?.state, "collected");
+  assert.equal(w.chain.channelState(ch.channelId)?.totalClaimed, 5000n);
+
+  const w2 = await world();
+  w2.chain.deposit(w2.config, 1_000_000n);
+  const ch2 = S.openClientChannel(NET, w2.config);
+  const c = await batchShare(w2, ch2, "2000000");
+  const d = await batchShare(w2, ch2, "3000000");
+  const v = (c.info.payment?.payload as unknown as S.BatchVoucherPayload).voucher;
+  assert.equal((await w2.chain.claim(ch2.channelId, v, 2000n)).ok, true, "someone else claims exactly the first share");
+  await w2.log.claimOutstanding();
+  assert.equal(w2.log.inspect(c.id)?.state, "uncollected");
+  assert.equal(w2.log.inspect(d.id)?.state, "collected", "it starts where the outside claim ended");
+  assert.equal(w2.chain.channelState(ch2.channelId)?.totalClaimed, 5000n);
+});
+
+test("a batch-settlement share on a settlement_pending purchase is skipped at once; the client's state stays as it was", async () => {
+  const w = await world();
+  w.chain.deposit(w.config, 1_000_000n);
+  const ch = S.openClientChannel(NET, w.config);
+  await batchShare(w, ch, "2000000");
+  const accepted = w.req("3000000");
+  const info = await w.share(accepted, { kind: "batch-settlement", channel: ch });
+  const r = await w.log.onSettled(w.payload(accepted, info), accepted, { success: false, errorReason: "settlement_pending", transaction: "0xpb", network: NET });
+  assert.deepEqual([r.outcome?.status, r.outcome?.reason], ["skipped", "purchase-not-final"]);
+  assert.equal(await w.log.resolvePending("0xpb", true), undefined, "nothing was held");
+  assert.ok(S.applyOutcomeToChannel(ch, r.outcome));
+  assert.equal(ch.chargedCumulativeAmount, "2000");
+  const next = await batchShare(w, ch, "3000000");
+  assert.equal(next.outcome?.status, "accepted", "the next voucher builds on the same base without a mismatch");
 });

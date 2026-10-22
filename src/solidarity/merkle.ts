@@ -86,7 +86,15 @@ export function buildTree(entries: Array<string | Uint8Array>): MerkleTree {
 /** Root hash (hex) of a list of entries. */
 export const merkleRoot = (entries: Array<string | Uint8Array>): string => buildTree(entries).rootHex;
 
-/** RFC 9162 section 2.1.3.2: is `entry` at `index` of a tree of `size` with root `rootHex`? */
+const HASH_HEX = /^[0-9a-fA-F]{64}$/;
+const half = (n: number): number => Math.floor(n / 2);
+
+/**
+ * RFC 9162 section 2.1.3.2: is `entry` at `index` of a tree of `size` with root `rootHex`?
+ * Never throws: malformed input (a proof that is not an array of 32-byte hex hashes, an entry
+ * that is not a string or bytes) is simply not a proof. Arithmetic, not 32-bit bitwise operators,
+ * so any size up to 2^53 works.
+ */
 export function verifyInclusion(
   entry: string | Uint8Array,
   index: number,
@@ -94,27 +102,29 @@ export function verifyInclusion(
   proofHex: string[],
   rootHex: string,
 ): boolean {
-  if (!Number.isInteger(index) || !Number.isInteger(size) || index < 0 || index >= size) return false;
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(size) || index < 0 || index >= size) return false;
+  if (!Array.isArray(proofHex) || typeof rootHex !== "string") return false;
+  if (typeof entry !== "string" && !(entry instanceof Uint8Array)) return false;
   let fn = index;
   let sn = size - 1;
   let r = leafHash(entry);
   for (const pHex of proofHex) {
     if (sn === 0) return false;
+    if (typeof pHex !== "string" || !HASH_HEX.test(pHex)) return false;
     const p = fromHex(pHex);
-    if (p.length !== 32) return false;
-    if ((fn & 1) === 1 || fn === sn) {
+    if (fn % 2 === 1 || fn === sn) {
       r = nodeHash(p, r);
-      if ((fn & 1) === 0) {
-        while ((fn & 1) === 0 && fn !== 0) {
-          fn >>= 1;
-          sn >>= 1;
+      if (fn % 2 === 0) {
+        while (fn % 2 === 0 && fn !== 0) {
+          fn = half(fn);
+          sn = half(sn);
         }
       }
     } else {
       r = nodeHash(r, p);
     }
-    fn >>= 1;
-    sn >>= 1;
+    fn = half(fn);
+    sn = half(sn);
   }
   return sn === 0 && toHex(r) === rootHex.toLowerCase();
 }

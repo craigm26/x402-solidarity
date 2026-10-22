@@ -86,7 +86,11 @@ export interface PaymentRequirements {
   extra?: Record<string, unknown>;
 }
 
-/** A complete x402 payment for the share: the pair /verify and /settle take. */
+/**
+ * The share's own x402 payment. The log checks it with its scheme code as
+ * /verify and /settle would, with paymentPayload = {x402Version: 2, accepted,
+ * payload} and paymentRequirements = accepted.
+ */
 export interface SharePayment {
   accepted: PaymentRequirements;
   payload: Record<string, unknown>;
@@ -146,10 +150,25 @@ export interface DescriptorAccept {
   extra?: Record<string, unknown>;
 }
 
+/** A public key as a JWK (RFC 7517): OKP Ed25519 for EdDSA, EC P-256 for ES256. */
+export interface PublicJwk {
+  kty: string;
+  crv?: string;
+  x?: string;
+  y?: string;
+}
+
+/**
+ * One statement key a log has used ("Signatures and keys"): its public key,
+ * and the first and last period it signed (`until` is null for the current
+ * key). DID documents and DNS show only current state, so a retired key's
+ * public key is known only from here.
+ */
 export interface DescriptorKey {
   kid: string;
   from: string;
   until: string | null;
+  jwk?: PublicJwk;
 }
 
 /** The log descriptor served at `GET <log>`. */

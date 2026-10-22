@@ -239,7 +239,7 @@ test("a signing failure gives the cap room back and frees the channel", async ()
 
 test("the client checks the channel against the log's descriptor entry", async () => {
   const w = world();
-  for (const [field, value, why] of [["receiverAuthorizer", "0x4444444444444444444444444444444444444444", /receiverAuthorizer/], ["withdrawDelay", 3600, /withdrawDelay/], ["token", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", /token/]] as const) {
+  for (const [field, value, why] of [["receiver", "0x2222222222222222222222222222222222222222", /receiver is not the fund/], ["receiverAuthorizer", "0x4444444444444444444444444444444444444444", /receiverAuthorizer/], ["withdrawDelay", 3600, /withdrawDelay/], ["token", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", /token/]] as const) {
     const ch = S.openClientChannel(NET, { ...w.config, [field]: value });
     const d = await w.build("2000000", { kind: "batch-settlement", channel: ch });
     assert.ok(!d.attached && why.test(d.why), field);
@@ -303,4 +303,33 @@ test("the schemas here are the spec's inline schemas", { skip: !siteFile("spec/s
   assert.deepEqual(example("settle-response").extensions.solidarity.schema, S.solidarityOutcomeSchema);
   const d = example("descriptor");
   assert.equal(d.minWithdrawDelay, undefined, "the channel's delay equals the entry's extra.withdrawDelay");
+});
+
+// ---- the seller only offers the slot ----------------------------------------------------------
+
+test("a seller cannot pre-fill the share: the client adds none when the declared info carries more than version and logs", async () => {
+  const w = world();
+  for (const extra of [{ log: LOG }, { rate: "0.01" }, { fund: "eip155:84532:0x000000000000000000000000000000000000dead" }, { id: "SellerChosenIdXXXXXXXXX" }]) {
+    const d = await w.build("48000000", { declared: { ...w.declared, ...extra } as SolidarityInfo });
+    assert.ok(!d.attached && /more than version and logs/.test(d.why), JSON.stringify(extra));
+  }
+  const ext: Record<string, unknown> = { [S.SOLIDARITY]: { info: { ...w.declared, rate: "0.01" }, schema: S.solidaritySchema } };
+  const before = structuredClone(ext);
+  const d = await S.appendSolidarityToExtensions(ext, w.ctx, { accepted: w.req("48000000"), purchaseWindow: { validAfter: String(w.chain.now - 60), validBefore: String(w.chain.now + 60) } });
+  assert.equal(d.attached, false);
+  assert.deepEqual(ext, before, "nothing appended, nothing overwritten");
+  assert.equal(w.counter.committed("2026-12"), 0n, "nothing counted against the cap");
+});
+
+// ---- the schema validator ------------------------------------------------------------------------
+
+test("the schema validator checks own properties only: constructor, __proto__ and toString are extra keys", () => {
+  for (const k of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    const v = JSON.parse(`{"version":2,"${k}":1}`);
+    assert.ok(S.validateSchema(S.solidaritySchema, v).some((e) => e.includes("not allowed")), k);
+  }
+  const outcome = JSON.parse('{"status":"skipped","reason":"duplicate","id":"x","log":"y","constructor":1}');
+  assert.equal(S.validateOutcome(outcome).valid, false);
+  assert.ok(S.validateSchema({ type: "object", required: ["toString"] }, {}).length > 0, "an inherited name never satisfies required");
+  assert.ok(S.validateSchema({ type: "object", dependentRequired: { a: ["valueOf"] } }, { a: 1 }).length > 0);
 });

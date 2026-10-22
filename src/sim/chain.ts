@@ -36,6 +36,7 @@ export class SimulatedChain implements LogChain {
   private n = 0;
   private readonly balances = new Map<string, bigint>(); // token|holder
   private readonly usedNonces = new Set<string>(); // token|from|nonce
+  private readonly nonceTx = new Map<string, string>(); // token|from|nonce -> the transfer that used it
   private readonly transfers = new Map<string, { token: Addr; from: Addr; to: Addr; value: bigint }>();
   private readonly channels = new Map<string, Channel>();
   private readonly claims = new Map<string, { channelId: string; increase: bigint }>(); // tx|channelId
@@ -97,6 +98,7 @@ export class SimulatedChain implements LogChain {
     this.add(token, a.to, value);
     const tx = this.txHash("transfer");
     this.transfers.set(tx, { token, from: a.from, to: a.to, value });
+    this.nonceTx.set(`${lc(token)}|${lc(a.from)}|${lc(a.nonce)}`, tx);
     this.log.push({ tx, kind: "transferWithAuthorization", detail: { from: a.from, to: a.to, value: a.value } });
     return { ok: true, transaction: tx };
   }
@@ -109,6 +111,14 @@ export class SimulatedChain implements LogChain {
   // LogChain
   submitExact(accepted: PaymentRequirements, payload: ExactEip3009Payload) {
     return this.transferWithAuthorization(accepted, payload);
+  }
+
+  /** The transfer that executed this authorization, whoever submitted it (a cancelled one has none). */
+  async findExactTransfer(accepted: PaymentRequirements, payload: ExactEip3009Payload) {
+    const a = payload.authorization;
+    const tx = this.nonceTx.get(`${lc(accepted.asset)}|${lc(a.from)}|${lc(a.nonce)}`);
+    const t = tx ? this.transfers.get(tx) : undefined;
+    return tx && t ? { transaction: tx, token: t.token, to: t.to, value: t.value } : undefined;
   }
 
   /** Open or top up a channel (the payer's deposit). */

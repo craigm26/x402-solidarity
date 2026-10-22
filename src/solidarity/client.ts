@@ -99,10 +99,13 @@ const isUint = (v: unknown): v is string => typeof v === "string" && /^(0|[1-9][
 /**
  * Apply a solidarity outcome to the channel and free it for the next share
  * ("Share kinds", batch-settlement; the binding's client verification rules).
- * The snapshot is untrusted: the new state is the previous one plus the
- * reported amount (0 when skipped or missing), applied only when that amount
- * is at most what this share signed and, if a snapshot is present, its
- * chargedCumulativeAmount agrees. Returns false when the state is left
+ * The snapshot is untrusted: when the share was accepted with a reported
+ * amount at most what it signed, the new state is the previous one plus the
+ * amount this share signed (the log advances chargedCumulativeAmount by the
+ * signed amount even when it records less, so no voucher leaves headroom
+ * another share could spend); when it was skipped, or the entry is missing,
+ * the state stays as it was. If a snapshot is present, its
+ * chargedCumulativeAmount must agree. Returns false when the state is left
  * unchanged; after a cumulative-mismatch, call resyncChannel.
  */
 export function applyOutcomeToChannel(channel: ClientChannel, outcome: SolidarityOutcome | undefined): boolean {
@@ -114,13 +117,12 @@ export function applyOutcomeToChannel(channel: ClientChannel, outcome: Solidarit
   if (sameChannel) channel.snapshot = snap;
   if (!f) return false;
   if (outcome && outcome.id !== f.id) return false;
-  let charged = 0n;
+  let advance = 0n;
   if (outcome?.status === "accepted") {
-    if (!isPositiveAmount(outcome.amount)) return false;
-    charged = BigInt(outcome.amount);
+    if (!isPositiveAmount(outcome.amount) || BigInt(outcome.amount) > BigInt(f.amount)) return false;
+    advance = BigInt(f.amount);
   }
-  if (charged > BigInt(f.amount)) return false;
-  const next = BigInt(channel.chargedCumulativeAmount) + charged;
+  const next = BigInt(channel.chargedCumulativeAmount) + advance;
   if (snap && (!sameChannel || !isUint(snap.chargedCumulativeAmount) || BigInt(snap.chargedCumulativeAmount) !== next)) return false;
   channel.chargedCumulativeAmount = next.toString();
   return true;
@@ -199,6 +201,11 @@ async function buildShareOrThrow(ctx: ShareContext, input: BuildShareInput): Pro
   if (problems.length) return { attached: false, why: `invalid owner policy: ${problems.join("; ")}` };
   const req = input.accepted;
 
+  // "A server's info MUST contain only version and logs." Anything else would be the seller
+  // choosing the log, rate, fund or id, and x402 lets the client append but never overwrite.
+  if (input.declared && Object.keys(input.declared).some((k) => k !== "version" && k !== "logs")) {
+    return { attached: false, why: "the seller's info carries more than version and logs" };
+  }
   if (input.mandateHolder !== undefined && input.mandateHolder !== input.self) {
     return { attached: false, why: "a mandate names another holder for this policy" };
   }

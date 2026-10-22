@@ -153,14 +153,17 @@ export function validateSchema(schema: Schema, value: unknown, path = ""): strin
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
     const props = (schema.properties ?? {}) as Record<string, Schema>; // a property may be `false`: never allowed
-    for (const r of (schema.required ?? []) as string[]) if (!(r in obj)) errs.push(`${path}/${r}: required`);
+    // Own properties only: `k in props` would also find constructor, __proto__, toString and the
+    // rest of Object.prototype, and let them past additionalProperties: false.
+    const has = (o: object, k: string) => Object.hasOwn(o, k);
+    for (const r of (schema.required ?? []) as string[]) if (!has(obj, r)) errs.push(`${path}/${r}: required`);
     for (const [k, v] of Object.entries(obj)) {
-      if (k in props) errs.push(...validateSchema(props[k], v, `${path}/${k}`));
+      if (has(props, k)) errs.push(...validateSchema(props[k], v, `${path}/${k}`));
       else if (schema.additionalProperties === false) errs.push(`${path}/${k}: not allowed`);
     }
     const dep = (schema.dependentRequired ?? {}) as Record<string, string[]>;
     for (const [k, needs] of Object.entries(dep)) {
-      if (k in obj) for (const n of needs) if (!(n in obj)) errs.push(`${path}/${n}: required when ${k} is present`);
+      if (has(obj, k)) for (const n of needs) if (!has(obj, n)) errs.push(`${path}/${n}: required when ${k} is present`);
     }
   }
   return errs;

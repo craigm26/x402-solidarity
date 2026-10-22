@@ -6,7 +6,8 @@
     "log": "https://log.example/solidarity",
     "funds": [
       "eip155:84532:0x000000000000000000000000000000000000beef",
-      "eip155:84532:0x000000000000000000000000000000000000f00d"
+      "eip155:84532:0x000000000000000000000000000000000000f00d",
+      "eip155:8453:0x000000000000000000000000000000000000f00d"
     ],
     "accepts": [
       {
@@ -37,7 +38,12 @@
       {
         "kid": "did:web:log.example#test-only-1",
         "from": "2026-10",
-        "until": null
+        "until": null,
+        "jwk": {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        }
       }
     ],
     "witnesses": [
@@ -177,6 +183,45 @@
           "salt": "0x000000000000000000000000000000000000000000000000000000000000006a"
         },
         "amount": "1000"
+      },
+      {
+        "id": "0x82fb24c675937f6563ba4d1c943265c00ceb34339ad7d2252c9659ff1717d330",
+        "config": {
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payerAuthorizer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "receiver": "0x000000000000000000000000000000000000f00d",
+          "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "withdrawDelay": 86400,
+          "salt": "0x000000000000000000000000000000000000000000000000000000000000006c"
+        },
+        "amount": "1000000"
+      },
+      {
+        "id": "0x4f6375dd271c47f1c4ee533500fbd6b6d34fd72b014997c01e84e7cced6ff2bd",
+        "config": {
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payerAuthorizer": "0x0000000000000000000000000000000000000000",
+          "receiver": "0x000000000000000000000000000000000000f00d",
+          "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "withdrawDelay": 86400,
+          "salt": "0x000000000000000000000000000000000000000000000000000000000000006d"
+        },
+        "amount": "1000000"
+      },
+      {
+        "id": "0x8076e1a75c4875a7a48407d7ae657888205e6f2e19a838a2b69825106af5fca5",
+        "config": {
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payerAuthorizer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "receiver": "0x000000000000000000000000000000000000f00d",
+          "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "withdrawDelay": 86400,
+          "salt": "0x000000000000000000000000000000000000000000000000000000000000006e"
+        },
+        "amount": "1000000"
       }
     ]
   },
@@ -2403,9 +2448,7 @@
           "totalClaimed": "0",
           "withdrawRequestedAt": 0,
           "refundNonce": "0",
-          "chargedCumulativeAmount": "2000",
-          "signedMaxClaimable": "2000",
-          "signature": "0x672dcd4687cef67ba4fe414ca430e6896401cf34c49a1ae33dbaf343e4f03ba81b9c8d5f5153c84c54b0a22da7968f36ff02d197b9c9741f126391cc067a823e1c"
+          "chargedCumulativeAmount": "2000"
         }
       }
     },
@@ -2602,9 +2645,7 @@
           "totalClaimed": "0",
           "withdrawRequestedAt": 0,
           "refundNonce": "0",
-          "chargedCumulativeAmount": "5000",
-          "signedMaxClaimable": "5000",
-          "signature": "0x73175ff8c8a62ed72e4c929f0e156940b26d06d20cca517d5c376539e0cbdcf0567733f909683cfbb2dc7ca48c26e3c3a29645b56a693ee1a992de6463c2e6621b"
+          "chargedCumulativeAmount": "5000"
         }
       },
       "want": {
@@ -3008,9 +3049,7 @@
           "totalClaimed": "0",
           "withdrawRequestedAt": 0,
           "refundNonce": "0",
-          "chargedCumulativeAmount": "9000",
-          "signedMaxClaimable": "15000",
-          "signature": "0xadf9e2ada9c9bba77faf40d29c74576d86621a8d6f250cf9f6f708d05acdc4be47fb9902f699769f7131c8ddb557581f3fff9677791e4e9a5ce9f2cfe4a498e91c"
+          "chargedCumulativeAmount": "15000"
         }
       },
       "want": {
@@ -6777,6 +6816,1726 @@
       "want": {
         "status": "skipped",
         "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "exact-pays-seller",
+      "note": "accepted.payTo and the authorization both name the seller, and the signature is valid: only the rule that payTo is the fund's address catches it.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "48000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0034",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "exact",
+                  "network": "eip155:84532",
+                  "amount": "48000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x2222222222222222222222222222222222222222",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "signature": "0x86505925630b0609fd9a12a2853beefaaade6d721f06e803bc0730054c5f6ef753fde1bf624c850e7c2cada96365d97bdfdacbabd8fec3e7217fafe9b8d1bd7b1c",
+                  "authorization": {
+                    "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "to": "0x2222222222222222222222222222222222222222",
+                    "value": "48000",
+                    "validAfter": "1796903400",
+                    "validBefore": "1796904120",
+                    "nonce": "0x1838e6a9444dd32dc1933940403d6ba11ff83963809a6e289a26fde893bbdc62"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "48000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0034",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment"
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "fund-on-another-chain",
+      "note": "The fund is on the allow-list but on Base mainnet; the share, signed to the same address, is on Base Sepolia.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "48000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0035",
+              "rate": "0.001",
+              "fund": "eip155:8453:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "exact",
+                  "network": "eip155:84532",
+                  "amount": "48000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "signature": "0x2d4d9bb329f5665861a9bbeb0e0dd91abd76246eece11821f40bd54611f7f37375c563e37edb492321c61fb78e37f8a75886efa68c3d3a58a62cf4fe00f9bc751b",
+                  "authorization": {
+                    "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "to": "0x000000000000000000000000000000000000F00D",
+                    "value": "48000",
+                    "validAfter": "1796903400",
+                    "validBefore": "1796904120",
+                    "nonce": "0xa8af8366e0dc025ab62c14d025a51013f4ec411c20f1786538e107bd343fb3dd"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "48000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0035",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment"
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "purchase-on-another-network",
+      "note": "The share and the fund are on Base Sepolia; the purchase is on Base mainnet.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "amount": "48000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0036",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "exact",
+                  "network": "eip155:84532",
+                  "amount": "48000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "signature": "0xfcce36f1eddf66261e44516c02f13f9a909a525df59f4f439f3ff52bde7c47583a70ada765bb669fce5ecced646f8cb03213a96de64450f0620874b0a9006db91b",
+                  "authorization": {
+                    "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "to": "0x000000000000000000000000000000000000F00D",
+                    "value": "48000",
+                    "validAfter": "1796903400",
+                    "validBefore": "1796904120",
+                    "nonce": "0x6022ae7e8cdf7f47df275bfa2d88213daee42a3ad41702593c44511ffe2f4fa8"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "amount": "48000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0036",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment"
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "requirements-network-differs",
+      "note": "The purchase's PaymentPayload.accepted is on Base Sepolia, but the requirements it settled under are on Base mainnet.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "48000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0037",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "exact",
+                  "network": "eip155:84532",
+                  "amount": "48000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "signature": "0x16e5abbdaaa2537c5df5b9185594e578aa808a99df1bfa387b44e2d24d1e88ac7bea0a503d556b7677b0f89e3dfa46ac51ace40d8bd382db19b8508059c615c21b",
+                  "authorization": {
+                    "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "to": "0x000000000000000000000000000000000000F00D",
+                    "value": "48000",
+                    "validAfter": "1796903400",
+                    "validBefore": "1796904120",
+                    "nonce": "0xc451be09598b23e5405befc20547eb18a294e2fd5e7e1aee83565277e95c9f82"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "amount": "48000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0037",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment"
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "schema-only",
+      "note": "accepted.amount is \"048000\": a number BigInt still reads, but not the schema's form. Valid in every other respect.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "48000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0038",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "exact",
+                  "network": "eip155:84532",
+                  "amount": "048000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "signature": "0xa3d5af88d76b95b404b5c0dcab1d8167653c10954dfd4e7d94fc8b2e70abef9030d80a91388f3a16627a9e0ebe9f33d353eff7c6c635c116c1b1c11161e94a1b1c",
+                  "authorization": {
+                    "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "to": "0x000000000000000000000000000000000000F00D",
+                    "value": "48000",
+                    "validAfter": "1796903400",
+                    "validBefore": "1796904120",
+                    "nonce": "0x6a1ebf6ee0a8cee3b2eaee2e4ef5a0105f54bcf0ce21f5d8ca43d022c60321f4"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "48000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0038",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment"
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "batch-voucher-stranger",
+      "note": "The voucher is signed by a key that is neither the channel's payer nor its payerAuthorizer.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "2000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0039",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "batch-settlement",
+                  "network": "eip155:84532",
+                  "amount": "2000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "withdrawDelay": 86400,
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "type": "voucher",
+                  "channelConfig": {
+                    "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "payerAuthorizer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "receiver": "0x000000000000000000000000000000000000f00d",
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "withdrawDelay": 86400,
+                    "salt": "0x000000000000000000000000000000000000000000000000000000000000006c"
+                  },
+                  "voucher": {
+                    "channelId": "0x82fb24c675937f6563ba4d1c943265c00ceb34339ad7d2252c9659ff1717d330",
+                    "maxClaimableAmount": "2000",
+                    "signature": "0xada7ac50c92bb0da43157637f5bcec2746859fc02e751933d13a4335de1cb066306df4b0cb6f8eb68dc3c32eed0b5f5f013928ef30bdb525484020512e729da81c"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "2000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0039",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment",
+        "channel": {
+          "channelId": "0x82fb24c675937f6563ba4d1c943265c00ceb34339ad7d2252c9659ff1717d330",
+          "balance": "1000000",
+          "totalClaimed": "0",
+          "withdrawRequestedAt": 0,
+          "refundNonce": "0",
+          "chargedCumulativeAmount": "0"
+        }
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "batch-payer-authorizer-zero",
+      "note": "payerAuthorizer is zero, so the contract would check the payer's signature with EIP-1271 if the payer has code; this log cannot check that offline and refuses the channel.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "2000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0040",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "batch-settlement",
+                  "network": "eip155:84532",
+                  "amount": "2000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "withdrawDelay": 86400,
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "type": "voucher",
+                  "channelConfig": {
+                    "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "payerAuthorizer": "0x0000000000000000000000000000000000000000",
+                    "receiver": "0x000000000000000000000000000000000000f00d",
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "withdrawDelay": 86400,
+                    "salt": "0x000000000000000000000000000000000000000000000000000000000000006d"
+                  },
+                  "voucher": {
+                    "channelId": "0x4f6375dd271c47f1c4ee533500fbd6b6d34fd72b014997c01e84e7cced6ff2bd",
+                    "maxClaimableAmount": "2000",
+                    "signature": "0x7af9ad9905910a23f0dc92742c9f360f9ec37b595f0f07b66b9b0637e6b429f83d36a52eab93ccbc2c43b9690bcdd59bebfdc179ad9488dd89bb2773e2de4fa11c"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "2000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0040",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "bad-payment",
+        "channel": {
+          "channelId": "0x4f6375dd271c47f1c4ee533500fbd6b6d34fd72b014997c01e84e7cced6ff2bd",
+          "balance": "1000000",
+          "totalClaimed": "0",
+          "withdrawRequestedAt": 0,
+          "refundNonce": "0",
+          "chargedCumulativeAmount": "0"
+        }
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "bad-payment"
+      }
+    },
+    {
+      "name": "batch-share-floors-to-zero",
+      "note": "A 1-unit share on a 999-unit purchase at 0.001: floor(basis x rate) is 0, so nothing is recorded.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "999",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0041",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "batch-settlement",
+                  "network": "eip155:84532",
+                  "amount": "1",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "withdrawDelay": 86400,
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "type": "voucher",
+                  "channelConfig": {
+                    "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "payerAuthorizer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "receiver": "0x000000000000000000000000000000000000f00d",
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "withdrawDelay": 86400,
+                    "salt": "0x000000000000000000000000000000000000000000000000000000000000006e"
+                  },
+                  "voucher": {
+                    "channelId": "0x8076e1a75c4875a7a48407d7ae657888205e6f2e19a838a2b69825106af5fca5",
+                    "maxClaimableAmount": "1",
+                    "signature": "0x714c071aac73759baec160c4c32d30e688f8a96bc236660c2d2ed51b4558fcb146a5058a1c2b7c20e49c1c6c6bcad367cbc43a54c00145520ea04f4bb4ac82d41c"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "999",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": true,
+        "transaction": "0xpurchase",
+        "network": "eip155:84532",
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      },
+      "expected": {
+        "id": "conformance-share-0041",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "below-minimum",
+        "channel": {
+          "channelId": "0x8076e1a75c4875a7a48407d7ae657888205e6f2e19a838a2b69825106af5fca5",
+          "balance": "1000000",
+          "totalClaimed": "0",
+          "withdrawRequestedAt": 0,
+          "refundNonce": "0",
+          "chargedCumulativeAmount": "0"
+        }
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "below-minimum"
+      }
+    },
+    {
+      "name": "pending-batch",
+      "note": "The purchase settle returned settlement_pending and the share is a batch-settlement voucher: skipped at once with purchase-not-final, nothing charged, and the client's channel state stays as it was.",
+      "paymentPayload": {
+        "x402Version": 2,
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:84532",
+          "amount": "2000000",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USDC",
+            "version": "2"
+          }
+        },
+        "payload": {
+          "signature": "0xPurchaseSignatureNotCheckedByTheLog"
+        },
+        "extensions": {
+          "solidarity": {
+            "info": {
+              "version": 2,
+              "logs": [
+                {
+                  "network": "eip155:84532",
+                  "scheme": "exact",
+                  "log": "https://log.example/solidarity"
+                }
+              ],
+              "log": "https://log.example/solidarity",
+              "id": "conformance-share-0042",
+              "rate": "0.001",
+              "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+              "payment": {
+                "accepted": {
+                  "scheme": "batch-settlement",
+                  "network": "eip155:84532",
+                  "amount": "2000",
+                  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                  "payTo": "0x000000000000000000000000000000000000f00d",
+                  "maxTimeoutSeconds": 60,
+                  "extra": {
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "withdrawDelay": 86400,
+                    "name": "USDC",
+                    "version": "2"
+                  }
+                },
+                "payload": {
+                  "type": "voucher",
+                  "channelConfig": {
+                    "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "payerAuthorizer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "receiver": "0x000000000000000000000000000000000000f00d",
+                    "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+                    "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "withdrawDelay": 86400,
+                    "salt": "0x0000000000000000000000000000000000000000000000000000000000000001"
+                  },
+                  "voucher": {
+                    "channelId": "0x8ee26786250804309d7ac49bb722e6e35c652b23a95692d890d42d8ae52bd6b4",
+                    "maxClaimableAmount": "17000",
+                    "signature": "0xec01c9be93fe7be500621830bead60d81af40e0814b32a9b587c4d14445fa97c38a448709b88d92819872730cf4cd2896d6ef7374da58a5cc4a4daf22989e3d51c"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 2
+                },
+                "logs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "network": {
+                        "type": "string"
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "log": {
+                        "type": "string",
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "network",
+                      "scheme",
+                      "log"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "log": {
+                  "type": "string",
+                  "pattern": "^https://"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{22,128}$"
+                },
+                "rate": {
+                  "type": "string",
+                  "pattern": "^0\\.(01|00[0-9]{0,3}[1-9])$"
+                },
+                "fund": {
+                  "type": "string",
+                  "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}:[-.%a-zA-Z0-9]{1,128}$"
+                },
+                "payment": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "scheme",
+                        "network",
+                        "amount",
+                        "asset",
+                        "payTo",
+                        "maxTimeoutSeconds"
+                      ]
+                    },
+                    "payload": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version"
+              ],
+              "dependentRequired": {
+                "payment": [
+                  "log",
+                  "id",
+                  "rate",
+                  "fund"
+                ]
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "requirements": {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "amount": "2000000",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      "settleResponse": {
+        "success": false,
+        "errorReason": "settlement_pending",
+        "transaction": "0xpendingbatchpurchase",
+        "network": "eip155:84532"
+      },
+      "expected": {
+        "id": "conformance-share-0042",
+        "log": "https://log.example/solidarity",
+        "status": "skipped",
+        "reason": "purchase-not-final",
+        "channel": {
+          "channelId": "0x8ee26786250804309d7ac49bb722e6e35c652b23a95692d890d42d8ae52bd6b4",
+          "balance": "1000000",
+          "totalClaimed": "0",
+          "withdrawRequestedAt": 0,
+          "refundNonce": "0",
+          "chargedCumulativeAmount": "15000"
+        }
+      },
+      "want": {
+        "status": "skipped",
+        "reason": "purchase-not-final"
       }
     }
   ]

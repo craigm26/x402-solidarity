@@ -181,3 +181,84 @@ test("lines and batches reject what the spec rules out", () => {
   assert.throws(() => S.parseFileBody("a"), /LF/);
   assert.throws(() => S.formatSettlement({ fund: "f", asset: "a", ref: "gift:1", amount: "1" }));
 });
+
+// ---- review of draft 2 -------------------------------------------------------------------
+
+test("witness: a right-period statement whose previous forks the chain is refused, and so is history that does not chain", () => {
+  const w = new S.Witness(witnessKey);
+  w.cosign(pubs[0], { resolveKey, descriptor: ST.descriptor });
+  const nov = S.decodeStatement(pubs[1].statement).payload;
+  const fork = S.signStatement({ ...nov, previous: "00".repeat(32) }, logKey);
+  assert.throws(() => w.cosign(fork, { resolveKey }), /previous does not chain/);
+  // History whose first statement does not chain from the last cosigned payload, and a statement chained to it.
+  const badNov = S.signStatement({ ...nov, previous: "11".repeat(32) }, logKey);
+  const dec = S.decodeStatement(pubs[2].statement).payload;
+  const onBad = S.signStatement({ ...dec, previous: S.statementHash(S.decodeStatement(badNov.statement).payload) }, logKey);
+  assert.throws(() => w.cosign(onBad, { resolveKey, history: [badNov] }), /history does not chain/);
+  w.cosign(pubs[2], { resolveKey, history: [pubs[1]] });
+});
+
+test("witness: a log's first statement is for the from period of its earliest key", () => {
+  const late = { ...ST.descriptor, keys: [{ ...ST.descriptor.keys[0], from: "2026-09" }] };
+  assert.throws(() => new S.Witness(witnessKey).cosign(pubs[0], { resolveKey, descriptor: late }), /first period is 2026-09/);
+  new S.Witness(witnessKey).cosign(pubs[0], { resolveKey, descriptor: ST.descriptor });
+  assert.equal(S.firstPeriod(ST.descriptor), "2026-10");
+});
+
+test("a cosignature over another payload does not count, even with a required cosigner's valid key", () => {
+  const oct = S.decodeStatement(pubs[0].statement).payload;
+  const other = S.jwsSign(S.statementBytes({ ...oct, issuedAt: oct.issuedAt + 1 }), witnessKey);
+  const r = S.verifyStatement({ statement: pubs[0].statement, cosignatures: [{ format: "jws", signature: other }] }, { resolveKey, requireCosigners: [witnessKey.kid] });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.cosigners, []);
+});
+
+test("key rotation: a retired key verifies from the descriptor's JWK, only with a required cosignature; did:web authorizes only the current key", () => {
+  const newKey = S.generateSigningKey("EdDSA", "did:web:log.example#test-only-next");
+  const rotated = {
+    log: ST.descriptor.log,
+    keys: [
+      { kid: logKey.kid, from: "2026-10", until: "2026-11", jwk: S.publicJwk(logKey.publicKey) },
+      { kid: newKey.kid, from: "2026-12", until: null, jwk: S.publicJwk(newKey.publicKey) },
+    ],
+  };
+  assert.deepEqual(rotated.keys[0].jwk, ST.descriptor.keys[0].jwk, "the conformance descriptor carries the same JWK");
+  // did:web and DNS now show only the new key.
+  const current = S.staticResolver({ [newKey.kid]: newKey.publicKey, [witnessKey.kid]: witnessKey.publicKey });
+  const onlyCurrent = (kid: string) => kid === newKey.kid;
+  const cosigned = S.verifyStatement(pubs[0], { resolveKey: current, descriptor: rotated, requireCosigners: [witnessKey.kid], authorizeLogKey: onlyCurrent });
+  assert.equal(cosigned.ok, true, cosigned.problems.join("; "));
+  const bare = S.verifyStatement(pubs[0], { resolveKey: current, descriptor: rotated, authorizeLogKey: onlyCurrent });
+  assert.equal(bare.ok, false);
+  assert.match(bare.problems.join(" "), /retired/);
+  assert.equal(S.verifyStatement(pubs[0], { resolveKey: current, requireCosigners: [witnessKey.kid], authorizeLogKey: onlyCurrent }).ok, false, "without the descriptor the old key cannot be found");
+  const receipt = S.verifyReceipt(V.receipt, { resolveKey: current, descriptor: rotated, requireCosigners: [witnessKey.kid], authorizeLogKey: onlyCurrent });
+  assert.equal(receipt.ok, true, receipt.problems.join("; "));
+  // Outside the retired key's periods, cosigned or not, it is refused.
+  const dec = S.verifyStatement(pubs[2], { resolveKey: current, descriptor: rotated, requireCosigners: [witnessKey.kid], authorizeLogKey: onlyCurrent });
+  assert.equal(dec.ok, false);
+  assert.match(dec.problems.join(" "), /not listed/);
+  // The current key still needs did:web or DNS.
+  const signedNew = S.signStatement(S.decodeStatement(pubs[2].statement).payload, newKey);
+  assert.equal(S.verifyStatement(signedNew, { resolveKey: current, descriptor: rotated }).ok, true);
+  assert.equal(S.verifyStatement(signedNew, { resolveKey: current, descriptor: rotated, authorizeLogKey: () => false }).ok, false);
+});
+
+test("verifyReceipt and verifyChain report malformed input as problems instead of throwing", () => {
+  const cases: Array<[string, unknown]> = [["non-hex", ["zz".repeat(32)]], ["odd length", ["abc"]], ["number", [42]], ["missing", undefined], ["not an array", "abc"]];
+  for (const [name, proof] of cases) {
+    let out: S.ReceiptCheck | undefined;
+    assert.doesNotThrow(() => {
+      out = S.verifyReceipt({ ...V.receipt, proof } as unknown as Receipt, { resolveKey });
+    }, name);
+    assert.equal(out?.ok, false, name);
+    assert.equal(out?.included, false, name);
+  }
+  assert.equal(S.verifyReceipt({ ...V.receipt, line: 7 } as unknown as Receipt, { resolveKey }).ok, false);
+  let chain: { ok: boolean; problems: string[] } | undefined;
+  assert.doesNotThrow(() => {
+    chain = S.verifyChain([pubs[0], { statement: { format: "jws", signature: "not.a.jws" }, cosignatures: [] }, pubs[2]]);
+  });
+  assert.equal(chain?.ok, false);
+  assert.match(chain?.problems.join(" ") ?? "", /statement 1/);
+});

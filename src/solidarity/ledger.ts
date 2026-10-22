@@ -7,11 +7,11 @@
  * raw r||s encoding JWS requires).
  */
 
-import type { KeyObject } from "node:crypto";
+import type { JsonWebKey, KeyObject } from "node:crypto";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as nodeSign, verify as nodeVerify } from "node:crypto";
 import { canonicalizeStrict, isCanonical } from "./jcs.ts";
 import { buildTree, EMPTY_ROOT_HEX, verifyInclusion } from "./merkle.ts";
-import type { JwsEnvelope, LogDescriptor, PublishedStatement, Receipt, StatementPayload, TotalsRow } from "./types.ts";
+import type { DescriptorKey, JwsEnvelope, LogDescriptor, PublicJwk, PublishedStatement, Receipt, StatementPayload, TotalsRow } from "./types.ts";
 import { AMOUNT_PATTERN, LINE_PREFIX, PERIOD_PATTERN, SHARE_ID_PATTERN } from "./types.ts";
 import { b64url, bytewise, canonicalAccount, nextPeriod, parseCaip10, sameAccount, unb64url } from "./utils.ts";
 
@@ -412,7 +412,33 @@ export function staticResolver(keys: Record<string, KeyObject>): KeyResolver {
 
 /** Is `kid` listed in the descriptor for `period` (from <= period <= until, until null = current)? */
 export function keyCoversPeriod(descriptor: Pick<LogDescriptor, "keys">, kid: string, period: string): boolean {
-  return descriptor.keys.some((k) => k.kid === kid && k.from <= period && (k.until === null || period <= k.until));
+  return listedKey(descriptor, kid, period) !== undefined;
+}
+
+/** The descriptor's entry for `kid` that covers `period`, if any. */
+export function listedKey(descriptor: Pick<LogDescriptor, "keys">, kid: string, period: string): DescriptorKey | undefined {
+  return descriptor.keys.find((k) => k.kid === kid && k.from <= period && (k.until === null || period <= k.until));
+}
+
+/** A log's first period: the `from` of the earliest key in its descriptor ("Consistency between months"). */
+export function firstPeriod(descriptor: Pick<LogDescriptor, "keys">): string | undefined {
+  return descriptor.keys.map((k) => k.from).sort()[0];
+}
+
+/** A public key from a descriptor's JWK, or undefined if it is not a usable Ed25519 or P-256 key. */
+export function publicKeyFromJwk(jwk: PublicJwk | undefined): KeyObject | undefined {
+  if (!jwk || typeof jwk !== "object") return undefined;
+  try {
+    return createPublicKey({ key: jwk as unknown as JsonWebKey, format: "jwk" });
+  } catch {
+    return undefined;
+  }
+}
+
+/** A key's public JWK, for a descriptor's `keys` entry. */
+export function publicJwk(key: KeyObject): PublicJwk {
+  const j = key.export({ format: "jwk" }) as PublicJwk;
+  return j.kty === "EC" ? { kty: "EC", crv: j.crv, x: j.x, y: j.y } : { kty: j.kty, crv: j.crv, x: j.x };
 }
 
 export interface StatementCheck {
@@ -427,22 +453,35 @@ export interface StatementCheck {
  * Verify a published statement: JCS form, version, the log's signature (by a
  * key the descriptor lists for that period, when a descriptor is given) and
  * every cosignature the verifier requires (by kid).
+ *
+ * Keys ("Signatures and keys"): did:web and DNS show only current state, so
+ * they can authorize only the current key. Without a descriptor, the key must
+ * be authorized that way. A key the descriptor lists as current must be too.
+ * A key the descriptor lists as retired is taken from the descriptor's `jwk`,
+ * and is accepted only with a valid cosignature the verifier requires: the
+ * witnesses checked it while it was current.
  */
 export function verifyStatement(pub: PublishedStatement, opts: VerifyOptions): StatementCheck {
   const problems: string[] = [];
   let d: ReturnType<typeof decodeStatement>;
   try {
-    d = decodeStatement(pub.statement);
+    d = decodeStatement(pub?.statement);
   } catch (e) {
     return { ok: false, problems: [(e as Error).message], cosigners: [] };
   }
-  // The key must belong to the log the statement names, whether or not a descriptor is given.
-  if (!(opts.authorizeLogKey ?? kidOnLogHost)(d.kid, d.payload.log)) problems.push(`key ${d.kid} is not authorized for ${d.payload.log}`);
+  const listed = opts.descriptor ? listedKey(opts.descriptor, d.kid, d.payload.period) : undefined;
+  const retired = listed !== undefined && listed.until !== null;
   if (opts.descriptor) {
     if (opts.descriptor.log !== d.payload.log) problems.push("statement is for another log");
-    if (!keyCoversPeriod(opts.descriptor, d.kid, d.payload.period)) problems.push(`key ${d.kid} is not listed for ${d.payload.period}`);
+    if (!listed) problems.push(`key ${d.kid} is not listed for ${d.payload.period}`);
   }
-  const logKey = opts.resolveKey(d.kid, { log: d.payload.log, role: "log" });
+  if (!retired) {
+    // The current key must belong to the log the statement names, whether or not a descriptor is given.
+    if (!(opts.authorizeLogKey ?? kidOnLogHost)(d.kid, d.payload.log)) problems.push(`key ${d.kid} is not authorized for ${d.payload.log}`);
+  } else if (!opts.requireCosigners?.length) {
+    problems.push(`key ${d.kid} is retired: it is accepted only with a cosignature the verifier requires`);
+  }
+  const logKey = (retired ? publicKeyFromJwk(listed?.jwk) : undefined) ?? opts.resolveKey(d.kid, { log: d.payload.log, role: "log" });
   if (!logKey) problems.push(`no key for ${d.kid}`);
   else if (!jwsVerify(pub.statement.signature, logKey)) problems.push("log signature invalid");
 
@@ -461,13 +500,21 @@ export function verifyStatement(pub: PublishedStatement, opts: VerifyOptions): S
   return { ok: problems.length === 0, payload: d.payload, hash: d.hash, problems, cosigners };
 }
 
-/** Statements chain by `previous` and cover consecutive periods (a gap is visible). */
+/** Statements chain by `previous` and cover consecutive periods (a gap is visible). Never throws. */
 export function verifyChain(pubs: PublishedStatement[]): { ok: boolean; problems: string[] } {
   const problems: string[] = [];
   let prev: { hash: string; period: string; log: string } | undefined;
+  if (!Array.isArray(pubs)) return { ok: false, problems: ["not a list of statements"] };
   // The first statement given may be mid-chain (its `previous` is not checked here).
-  pubs.forEach((p) => {
-    const d = decodeStatement(p.statement);
+  pubs.forEach((p, i) => {
+    let d: ReturnType<typeof decodeStatement>;
+    try {
+      d = decodeStatement(p?.statement);
+    } catch (e) {
+      problems.push(`statement ${i}: ${(e as Error).message}`);
+      prev = undefined;
+      return;
+    }
     if (prev) {
       if (d.payload.log !== prev.log) problems.push(`${d.payload.period}: another log`);
       if (d.payload.period !== nextPeriod(prev.period)) problems.push(`${d.payload.period}: does not follow ${prev.period}`);
@@ -513,14 +560,18 @@ export function verifyReceipt(receipt: Receipt, opts: VerifyOptions): ReceiptChe
   out.problems.push(...st.problems);
   if (!st.payload) return out;
   out.canonical = true;
-  out.signature = !st.problems.some((p) => p.startsWith("log signature") || p.startsWith("no key") || p.includes("is not authorized for"));
+  out.signature = !st.problems.some((p) => p.startsWith("log signature") || p.startsWith("no key") || p.includes("is not authorized for") || p.includes("is retired"));
   try {
     out.period = parseLine(receipt.line).period === st.payload.period;
   } catch (e) {
     out.problems.push((e as Error).message);
   }
   if (!out.period) out.problems.push("line period does not match the statement");
-  out.included = verifyInclusion(receipt.line, receipt.index, st.payload.size, receipt.proof, st.payload.root);
+  try {
+    out.included = verifyInclusion(receipt.line, receipt.index, st.payload.size, receipt.proof, st.payload.root);
+  } catch {
+    out.included = false;
+  }
   if (!out.included) out.problems.push("audit path does not lead to the root");
   out.ok = out.problems.length === 0;
   return out;
@@ -561,6 +612,11 @@ export class Witness {
 
     if (already === undefined) {
       const last = this.last.get(p.log);
+      // A log's first statement (previous null) is for the `from` of its earliest key.
+      if (!last && p.previous === null && opts.descriptor) {
+        const first = firstPeriod(opts.descriptor);
+        if (first !== undefined && p.period !== first) throw new Error(`witness refuses: the log's first period is ${first}, not ${p.period}`);
+      }
       if (last) {
         let hash = last.hash;
         let period = last.period;

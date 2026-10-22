@@ -35,6 +35,10 @@ const NET = S.BASE_SEPOLIA;
 const LOG = "https://log.example/solidarity";
 const FUND = "eip155:84532:0x000000000000000000000000000000000000f00d";
 const FUND2 = "eip155:84532:0x000000000000000000000000000000000000beef";
+const FUND_ON_BASE = "eip155:8453:0x000000000000000000000000000000000000f00d"; // allowed, but on another chain than every share kind
+const ZERO = "0x0000000000000000000000000000000000000000" as const;
+/** Hardhat/Anvil development account 1: public, never funded. Signs vouchers for a channel that is not its own. */
+const STRANGER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as const;
 const FUND_ADDR = "0x000000000000000000000000000000000000f00d";
 const SELLER = "0x2222222222222222222222222222222222222222";
 const AUTHORIZER = "0x3333333333333333333333333333333333333333";
@@ -44,12 +48,12 @@ const CLOSE_AT = Date.UTC(2027, 0, 5) / 1000; // 2027-01-05, as the spec vectors
 export const DESCRIPTOR: LogDescriptor = {
   version: 2,
   log: LOG,
-  funds: [FUND2, FUND],
+  funds: [FUND2, FUND, FUND_ON_BASE],
   accepts: [
     { network: NET, asset: USDC.toLowerCase(), scheme: "batch-settlement", maxTimeoutSeconds: 60, extra: { receiverAuthorizer: AUTHORIZER, withdrawDelay: 86400, name: "USDC", version: "2" } },
     { network: NET, asset: USDC.toLowerCase(), scheme: "exact", maxTimeoutSeconds: 60, minAmount: "10000", extra: { name: "USDC", version: "2" } },
   ],
-  keys: [{ kid: TEST_KEYS.log.kid, from: "2026-10", until: null }],
+  keys: [{ kid: TEST_KEYS.log.kid, from: "2026-10", until: null, jwk: S.publicJwk(S.ed25519FromSeed(TEST_KEYS.log.seed, TEST_KEYS.log.kid).publicKey) }],
   witnesses: ["did:web:witness.example"],
 };
 
@@ -298,12 +302,17 @@ export async function runCases() {
   // 21 onwards: one case per bad-payment check, each valid in every other respect, so a log
   // that left the check out would accept it.
   const pay = (i: SolidarityInfo) => i.payment as NonNullable<SolidarityInfo["payment"]>;
-  const exactShare = async (name: string, note: string, tweak: { sign?: Partial<PaymentRequirements>; window?: { validAfter: string; validBefore: string; nonce?: `0x${string}` }; accepted?: Partial<PaymentRequirements> }) => {
+  const exactShare = async (
+    name: string,
+    note: string,
+    tweak: { sign?: Partial<PaymentRequirements>; window?: { validAfter: string; validBefore: string; nonce?: `0x${string}` }; accepted?: Partial<PaymentRequirements>; info?: Partial<SolidarityInfo>; purchase?: PaymentRequirements; requirements?: PaymentRequirements },
+  ) => {
     const id = idOf(w.nextN());
     const accepted: PaymentRequirements = { scheme: "exact", network: NET, amount: "48000", asset: USDC, payTo: FUND_ADDR, maxTimeoutSeconds: 60, extra: { name: "USDC", version: "2" } };
     const sig = await S.signEip3009(account, { ...accepted, ...tweak.sign }, { ...w.shareWindow(id), ...tweak.window });
-    const info: SolidarityInfo = { version: 2, logs: declared().logs, log: LOG, id, rate: "0.001", fund: FUND, payment: { accepted: { ...accepted, ...tweak.accepted }, payload: sig as unknown as Record<string, unknown> } };
-    const c: Case = { name, note, paymentPayload: w.payloadWith(w.p48, info), requirements: w.p48, settleResponse: ok(), expected: null, want: skip("bad-payment") };
+    const info: SolidarityInfo = { version: 2, logs: declared().logs, log: LOG, id, rate: "0.001", fund: FUND, payment: { accepted: { ...accepted, ...tweak.accepted }, payload: sig as unknown as Record<string, unknown> }, ...tweak.info };
+    const purchase = tweak.purchase ?? w.p48;
+    const c: Case = { name, note, paymentPayload: w.payloadWith(purchase, info), requirements: tweak.requirements ?? purchase, settleResponse: ok(), expected: null, want: skip("bad-payment") };
     cases.push(c);
     await run(c);
   };
@@ -327,7 +336,11 @@ export async function runCases() {
     setup.deposits.push({ id: S.computeChannelId(config, NET).toLowerCase(), config, amount: amount.toString() });
   };
   let salt = 100;
-  const voucherShare = async (name: string, note: string, opts: { config?: Partial<S.ChannelConfig>; deposit?: bigint; idFrom?: Partial<S.ChannelConfig>; amount?: string; depositToken?: string }) => {
+  const voucherShare = async (
+    name: string,
+    note: string,
+    opts: { config?: Partial<S.ChannelConfig>; deposit?: bigint; idFrom?: Partial<S.ChannelConfig>; amount?: string; depositToken?: string; signer?: S.TypedDataSigner; purchaseAmount?: string; want?: Want },
+  ) => {
     salt += 1;
     const config = { ...w.channelConfig, salt: nonceOf(salt), ...opts.config };
     if (opts.deposit !== 0n) deposit(config, opts.deposit ?? 1_000_000n);
@@ -337,7 +350,7 @@ export async function runCases() {
     // An out-of-range withdrawDelay cannot be hashed; the voucher then names the in-range channel's id.
     const hashable = idConfig.withdrawDelay >= 0 ? idConfig : { ...idConfig, withdrawDelay: 86400 };
     const channelId = S.computeChannelId(hashable, NET);
-    const voucher = await S.signVoucher(account, channelId, amount, NET);
+    const voucher = await S.signVoucher(opts.signer ?? account, channelId, amount, NET);
     const id = idOf(w.nextN());
     const info: SolidarityInfo = {
       version: 2,
@@ -348,8 +361,8 @@ export async function runCases() {
       fund: FUND,
       payment: { accepted: { scheme: "batch-settlement", network: NET, amount, asset: USDC, payTo: FUND_ADDR, maxTimeoutSeconds: 60, extra: { ...batchEntry.extra } }, payload: { type: "voucher", channelConfig: config, voucher } },
     };
-    const purchase = { ...w.p2, amount: String(BigInt(amount) * 1000n) };
-    const c: Case = { name, note, paymentPayload: w.payloadWith(purchase, info), requirements: purchase, settleResponse: ok(), expected: null, want: skip("bad-payment") };
+    const purchase = { ...w.p2, amount: opts.purchaseAmount ?? String(BigInt(amount) * 1000n) };
+    const c: Case = { name, note, paymentPayload: w.payloadWith(purchase, info), requirements: purchase, settleResponse: ok(), expected: null, want: opts.want ?? skip("bad-payment") };
     cases.push(c);
     await run(c);
   };
@@ -360,6 +373,32 @@ export async function runCases() {
   await voucherShare("batch-withdraw-delay", "The channel's withdrawDelay (3600) is not the descriptor entry's (86400).", { config: { withdrawDelay: 3600 } });
   await voucherShare("batch-over-balance", "The voucher's ceiling (2000) is more than the channel holds (1000).", { deposit: 1000n });
   await voucherShare("batch-withdraw-delay-out-of-range", "withdrawDelay -1 cannot be hashed as uint40; the share is skipped and the purchase's response is untouched.", { config: { withdrawDelay: -1 }, deposit: 0n });
+
+  // Each of these breaks one rule that no other check catches, so a log that left the rule out
+  // would accept the share.
+  await exactShare("exact-pays-seller", "accepted.payTo and the authorization both name the seller, and the signature is valid: only the rule that payTo is the fund's address catches it.", { sign: { payTo: SELLER }, accepted: { payTo: SELLER } });
+  await exactShare("fund-on-another-chain", "The fund is on the allow-list but on Base mainnet; the share, signed to the same address, is on Base Sepolia.", { info: { fund: FUND_ON_BASE } });
+  await exactShare("purchase-on-another-network", "The share and the fund are on Base Sepolia; the purchase is on Base mainnet.", { purchase: { ...w.p48, network: "eip155:8453" } });
+  await exactShare("requirements-network-differs", "The purchase's PaymentPayload.accepted is on Base Sepolia, but the requirements it settled under are on Base mainnet.", { requirements: { ...w.p48, network: "eip155:8453" } });
+  await exactShare("schema-only", "accepted.amount is \"048000\": a number BigInt still reads, but not the schema's form. Valid in every other respect.", { accepted: { amount: "048000" } });
+  await voucherShare("batch-voucher-stranger", "The voucher is signed by a key that is neither the channel's payer nor its payerAuthorizer.", { signer: privateKeyToAccount(STRANGER_KEY) });
+  await voucherShare("batch-payer-authorizer-zero", "payerAuthorizer is zero, so the contract would check the payer's signature with EIP-1271 if the payer has code; this log cannot check that offline and refuses the channel.", { config: { payerAuthorizer: ZERO } });
+  await voucherShare("batch-share-floors-to-zero", "A 1-unit share on a 999-unit purchase at 0.001: floor(basis x rate) is 0, so nothing is recorded.", { amount: "1", purchaseAmount: "999", want: skip("below-minimum") });
+
+  // A batch-settlement share on a settlement_pending purchase is skipped at once: a held voucher
+  // would be signed on the same base as the client's next one.
+  const iPB = await w.share(w.p2, { kind: "batch-settlement", channel: clientChannel });
+  const cPB: Case = {
+    name: "pending-batch",
+    note: "The purchase settle returned settlement_pending and the share is a batch-settlement voucher: skipped at once with purchase-not-final, nothing charged, and the client's channel state stays as it was.",
+    paymentPayload: w.payloadWith(w.p2, iPB),
+    requirements: w.p2,
+    settleResponse: { success: false, errorReason: "settlement_pending", transaction: "0xpendingbatchpurchase", network: NET },
+    expected: null,
+    want: skip("purchase-not-final"),
+  };
+  cases.push(cPB);
+  if (!S.applyOutcomeToChannel(clientChannel, (await run(cPB)).outcome)) throw new Error("pending-batch: the client could not apply the outcome");
 
   await Promise.all(followUps);
   return { ...w, log, clock, cases, setup };

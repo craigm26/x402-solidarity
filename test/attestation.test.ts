@@ -296,3 +296,54 @@ test("net credits are counted per purchase: two partial refunds of a share the c
   assert.equal(c1 + c2, 100n);
   assert.equal(S.netCredit("1000000", "0.001", "100", c1), c2);
 });
+
+// ---- review of draft 2 -------------------------------------------------------------------
+
+test("the fund refuses a transfer in another token, and a claim on a channel that pays someone else", async () => {
+  const w = setup();
+  const OTHER = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  w.chain.mint(OTHER, w.payer.address, 1_000_000n);
+  const otherTx = w.chain.transfer(OTHER, w.payer.address, FUND_ADDR, 48000n);
+  const s1 = body([entry(`exact:${otherTx}`, 48000n)]);
+  const a = statement([line(1, "48000")], s1);
+  assert.throws(() => fundOf(w).cosign(a.pub, s1, { resolveKey }), /not a transfer/);
+  const id = w.chain.deposit({ ...w.config, receiver: "0x5555555555555555555555555555555555555555", salt: `0x${"0".repeat(63)}2` }, 1_000_000n);
+  const v = await S.signVoucher(w.payer, id as `0x${string}`, "5000", NET);
+  const c = await w.chain.claim(id, v, 5000n);
+  assert.ok(c.ok);
+  const s2 = body([entry(`claim:${(c as { transaction: string }).transaction}:${id}`, 5000n)]);
+  const b = statement([line(2, "5000")], s2);
+  assert.throws(() => fundOf(w).cosign(b.pub, s2, { resolveKey }), /not a claim/);
+});
+
+test("the fund never cosigns a second payload for a period it has cosigned", () => {
+  const w = setup();
+  const fund = fundOf(w);
+  const a = statement([], "");
+  fund.cosign(a.pub, "", { resolveKey });
+  const again = S.signStatement({ ...a.payload, issuedAt: a.payload.issuedAt + 1 }, logKey);
+  assert.throws(() => fund.cosign(again, "", { resolveKey }), /already cosigned another payload/);
+});
+
+test("statements: totals out of order and an empty batch with another root are refused; settlements for a pair with no row do not add up", () => {
+  const FUND_B = "eip155:84532:0x000000000000000000000000000000000000beef";
+  const lineB = S.formatLine({ period: "2026-10", fund: FUND_B, asset: USDC, id: shareId(2), amount: "1000" });
+  const { payload } = statement([line(1, "48000"), lineB], body([]));
+  assert.deepEqual(S.statementProblems(payload), []);
+  assert.match(S.statementProblems({ ...payload, totals: [...payload.totals].reverse() }).join(" "), /out of order/);
+  assert.match(S.statementProblems({ ...payload, size: 0, totals: [] }).join(" "), /empty batch/);
+  const rowA = payload.totals.find((t) => t.fund === FUND) as S.TotalsRow;
+  const eA = entry(`exact:0x${"a".repeat(64)}`, 48000n);
+  const eB = S.formatSettlement({ fund: FUND_B, asset: USDC, ref: `exact:0x${"b".repeat(64)}`, amount: "1000" });
+  assert.equal(S.settlementsMatchTotals([eA], [rowA]), true);
+  assert.equal(S.settlementsMatchTotals([eA, eB], [rowA]), false);
+});
+
+test("verifyChain: the right previous hash is not enough; the period must be the next one, and the log the same", () => {
+  const oct = statement([], "");
+  const h = S.statementHash(oct.payload);
+  const dec = statement([], "", { period: "2026-12", previous: h });
+  assert.match(S.verifyChain([oct.pub, dec.pub]).problems.join(" "), /does not follow/);
+  const other = statement([], "", { period: "2026-11", previous: h, log: "https://other.example/solidarity" });
+  assert.match(S.verifyChain([oct.pub, other.pub]).problems.join(" "), /another log/);
+});

@@ -19,7 +19,7 @@
  */
 
 import { getAddress } from "viem";
-import { MAX_WITHDRAW_DELAY, MIN_WITHDRAW_DELAY, VALID_BEFORE_BUFFER_SECONDS } from "./constants.ts";
+import { MAX_WITHDRAW_DELAY, MIN_WITHDRAW_DELAY, VALID_BEFORE_BUFFER_SECONDS, ZERO_ADDRESS } from "./constants.ts";
 import { canonicalize } from "./jcs.ts";
 import type { BatchVoucherPayload, ExactEip3009Payload, VoucherFields } from "./evm.ts";
 import { computeChannelId, isBatchVoucherPayload, isExactEip3009Payload, verifyEip3009Signature, verifyVoucherSignature } from "./evm.ts";
@@ -68,6 +68,12 @@ export interface LogChain {
   channelState(channelId: string): { balance: bigint; totalClaimed: bigint; withdrawRequestedAt: number; refundNonce: bigint } | undefined;
   /** Claim a channel up to `totalClaimed` with the payer's voucher. */
   claim(channelId: string, voucher: VoucherFields, totalClaimed: bigint): Promise<{ ok: true; transaction: string } | { ok: false; error: string }>;
+  /**
+   * Optional: the transaction that executed this EIP-3009 authorization, whoever submitted it, and
+   * what it moved (a real chain reads the token's AuthorizationUsed and Transfer events). Without
+   * it, a share whose authorization someone else executed first is reported uncollected.
+   */
+  findExactTransfer?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<{ transaction: string; token: string; to: string; value: bigint } | undefined>;
 }
 
 type ShareState = "pending" | "queued" | "collected" | "uncollected";
@@ -90,7 +96,10 @@ interface ChannelRecord {
   config: BatchVoucherPayload["channelConfig"];
   fund: string;
   asset: string;
+  /** chargedCumulativeAmount: the voucher base. It moves by what each share signed. */
   charged: bigint;
+  /** Where the next share's recorded amount starts: claims go up to these positions, never to `charged`. */
+  recorded: bigint;
   claimedByLog: bigint;
   latestVoucher?: VoucherFields;
   shares: string[]; // ids in charge order
@@ -120,6 +129,11 @@ export interface SolidarityLogOptions {
   chain: LogChain;
   /** Unix seconds. */
   clock?: () => number;
+  /**
+   * How long after a period ends the log keeps retrying failed claims before it closes the period
+   * anyway, with those shares uncollected. Default 14 days, inside the spec's 15-day SHOULD.
+   */
+  claimGraceSeconds?: number;
 }
 
 const CORE_FIELDS = ["success", "errorReason", "payer", "transaction", "network", "amount"] as const;
@@ -136,6 +150,7 @@ export class SolidarityLog {
   readonly descriptor: LogDescriptor;
   private readonly chain: LogChain;
   private readonly clock: () => number;
+  private readonly claimGraceSeconds: number;
 
   private readonly shares = new Map<string, ShareRecord>();
   private readonly reserved = new Set<string>();
@@ -149,6 +164,7 @@ export class SolidarityLog {
     this.book = new LogBook(opts.descriptor, opts.key);
     this.chain = opts.chain;
     this.clock = opts.clock ?? (() => Math.floor(Date.now() / 1000));
+    this.claimGraceSeconds = opts.claimGraceSeconds ?? 14 * 86400;
   }
 
   // ---- verify --------------------------------------------------------------
@@ -210,6 +226,14 @@ export class SolidarityLog {
       // Spec choice: refund payloads, server-written settles and escrow flows never trigger a
       // share; the spec names no reason for them, so they get purchase-not-supported.
       outcome = { ...base, status: "skipped", reason: "purchase-not-supported" };
+    } else if (!settleResponse.success && settleResponse.errorReason === "settlement_pending" && settleResponse.transaction && shareScheme(info) !== "exact") {
+      // Only exact shares are held for a pending purchase. A held voucher would be signed on the
+      // same chargedCumulativeAmount as the client's next one, so it is skipped at once and
+      // nothing is charged; the client leaves its channel state as it was.
+      outcome = { ...base, status: "skipped", reason: "purchase-not-final" };
+      const cid = voucherChannelId(info);
+      const snap = cid ? this.snapshot(cid) : undefined;
+      if (snap) outcome.channel = snap;
     } else if (!settleResponse.success && settleResponse.errorReason === "settlement_pending" && settleResponse.transaction) {
       // Spec choice: the share is only held here. Its checks run when the purchase confirms
       // (resolvePending), and its period is the month it is accepted then.
@@ -273,9 +297,7 @@ export class SolidarityLog {
     basis: bigint,
   ): Promise<{ outcome: SolidarityOutcome; followUp: Promise<void> }> {
     const base = this.baseOutcome(info);
-    const payment = info.payment as NonNullable<SolidarityInfo["payment"]>;
-    const kind = payment?.accepted?.scheme;
-    const channelId = kind === "batch-settlement" ? (payment?.payload as { voucher?: { channelId?: string } })?.voucher?.channelId : undefined;
+    const channelId = voucherChannelId(info);
 
     const run = async (): Promise<{ outcome: SolidarityOutcome; followUp: Promise<void> }> => {
       let reservedId: string | undefined;
@@ -287,14 +309,25 @@ export class SolidarityLog {
         const period = periodOf(now);
         const rec = this.record(info, checked, period);
         const outcome: SolidarityOutcome = { ...base, status: "accepted", period, amount: rec.amount.toString() };
-        if (rec.batch) outcome.channel = this.snapshot(rec.batch.channelId);
-        const followUp = rec.kind === "exact" ? this.submitExact(rec) : Promise.resolve();
+        let followUp: Promise<void> = Promise.resolve();
+        if (rec.batch) {
+          outcome.channel = this.snapshot(rec.batch.channelId);
+          // "The log MUST claim outstanding share vouchers ... before the withdrawal delay elapses":
+          // a share accepted while a withdrawal is pending is claimed at once.
+          if ((this.chain.channelState(rec.batch.channelId)?.withdrawRequestedAt ?? 0) !== 0) {
+            followUp = this.claimOutstanding(rec.batch.channelId).catch(() => undefined);
+          }
+        } else if (rec.kind === "exact") {
+          followUp = this.submitExact(rec);
+        }
         return { outcome, followUp };
       } catch (e) {
         if (!(e instanceof Skip)) throw e;
         const outcome: SolidarityOutcome = { ...base, status: "skipped", reason: e.reason };
-        if (channelId && typeof channelId === "string") {
-          const snap = this.snapshot(channelId);
+        if (channelId) {
+          // The last voucher goes back only with a cumulative-mismatch, whose voucher verified for
+          // the channel, so the client can resync (as with the binding's Corrective 402).
+          const snap = this.snapshot(channelId, e.reason === "cumulative-mismatch");
           if (snap) outcome.channel = snap;
         }
         return { outcome, followUp: Promise.resolve() };
@@ -304,7 +337,7 @@ export class SolidarityLog {
     };
 
     // Serialize processing per channel ("The log MUST serialize processing per channel").
-    if (channelId && typeof channelId === "string") return this.withChannelLock(channelId.toLowerCase(), run);
+    if (channelId) return this.withChannelLock(channelId.toLowerCase(), run);
     return run();
   }
 
@@ -330,7 +363,7 @@ export class SolidarityLog {
     requirements: PaymentRequirements,
     basis: bigint,
     reserve: (id: string) => void,
-  ): Promise<{ kind: ShareKind; amount: bigint; fund: string; asset: string; entry: DescriptorAccept; channel?: { id: string; voucher: VoucherFields; config: BatchVoucherPayload["channelConfig"]; charged: bigint } }> {
+  ): Promise<{ kind: ShareKind; amount: bigint; signed: bigint; fund: string; asset: string; entry: DescriptorAccept; channel?: { id: string; voucher: VoucherFields; config: BatchVoucherPayload["channelConfig"]; charged: bigint } }> {
     const d = this.descriptor;
     const payment = info.payment;
     const accepted = payment?.accepted;
@@ -367,24 +400,22 @@ export class SolidarityLog {
       throw new Skip("bad-payment", "terms differ from the descriptor entry");
     }
 
-    // `rate` is at most 0.01.
+    // `rate`, written as a decimal, is at most 0.01. A rate in any other form fails the schema.
     if (typeof info.rate !== "string" || !RATE_PATTERN.test(info.rate)) {
       if (isDecimal(info.rate) && compareDecimal(info.rate, "0.01") > 0) throw new Skip("over-rate");
-      // Spec choice: no reason exists for a malformed share; a well-formed rate above 0.01 is
-      // over-rate, anything else the schema rules out is bad-payment.
       throw new Skip("bad-payment", "rate is not a canonical decimal from 0.000001 to 0.01");
     }
 
-    // `id` has not been seen in this log.
+    // The info validates against the schema (the id's form included).
     if (!isValidShareId(info.id)) throw new Skip("bad-payment", "id");
+    if (validateSchema(solidaritySchema, info).length > 0) throw new Skip("bad-payment", "schema");
+
+    // `id` has not been seen in this log.
     // Spec choice: only ids the log holds (accepted, pending, or being checked) count as seen,
     // so a share skipped for a reason the client can fix may be retried with the same id.
     if (this.shares.has(info.id) || this.reserved.has(info.id)) throw new Skip("duplicate");
     reserve(info.id);
     this.reserved.add(info.id);
-
-    // Anything else the schema rules out.
-    if (validateSchema(solidaritySchema, info).length > 0) throw new Skip("bad-payment", "schema");
 
     // The share verifies under its scheme.
     let channel: { id: string; voucher: VoucherFields; config: BatchVoucherPayload["channelConfig"]; charged: bigint } | undefined;
@@ -415,6 +446,10 @@ export class SolidarityLog {
       const auth = entry.extra?.receiverAuthorizer;
       if (typeof auth !== "string" || !sameAccount(c.receiverAuthorizer, auth)) throw new Skip("bad-payment", "receiverAuthorizer");
       if (!sameAccount(c.token, accepted.asset)) throw new Skip("bad-payment", "token");
+      // An implementation limit, not a spec rule: with payerAuthorizer = 0 the contract checks the
+      // payer's signature with EIP-1271 when the payer has code, which this offline check cannot do,
+      // so a voucher that looks valid here could make every claim revert. Such channels are refused.
+      if (sameAccount(c.payerAuthorizer, ZERO_ADDRESS)) throw new Skip("bad-payment", "payerAuthorizer is zero");
       if (!(await verifyVoucherSignature(c, p.voucher, accepted.network))) throw new Skip("bad-payment", "voucher signature");
       const state = this.chain.channelState(cid);
       if (!state || state.balance === 0n) throw new Skip("bad-payment", "channel not found");
@@ -432,7 +467,7 @@ export class SolidarityLog {
     if (amount === 0n) throw new Skip("below-minimum");
     if (kind === "exact" && amount < BigInt(entry.minAmount ?? "1")) throw new Skip("below-minimum");
     if (kind === "exact" && amount < signed) throw new Skip("amount-changed");
-    return { kind, amount, fund: canonicalAccount(info.fund), asset: canonicalAccount(accepted.asset), entry, channel };
+    return { kind, amount, signed, fund: canonicalAccount(info.fund), asset: canonicalAccount(accepted.asset), entry, channel };
   }
 
   private record(
@@ -450,11 +485,16 @@ export class SolidarityLog {
       const ch = c.channel as NonNullable<typeof c.channel>;
       let cr = this.channels.get(ch.id);
       if (!cr) {
-        cr = { channelId: ch.id, config: ch.config, fund: c.fund, asset: c.asset, charged: ch.charged, claimedByLog: ch.charged, shares: [] };
+        cr = { channelId: ch.id, config: ch.config, fund: c.fund, asset: c.asset, charged: ch.charged, recorded: ch.charged, claimedByLog: ch.charged, shares: [] };
         this.channels.set(ch.id, cr);
       }
-      rec.batch = { channelId: ch.id, from: cr.charged, to: cr.charged + c.amount };
-      cr.charged += c.amount;
+      rec.batch = { channelId: ch.id, from: cr.recorded, to: cr.recorded + c.amount };
+      cr.recorded += c.amount;
+      // The voucher base moves by the full amount the payer signed, even when less is recorded
+      // (an upto purchase that settled lower). Each voucher then backs exactly one share, and no
+      // signed headroom is left for another share, under another id, to spend. The difference is
+      // never claimed; it stays in the payer's unspent deposit.
+      cr.charged += c.signed;
       cr.latestVoucher = ch.voucher;
       cr.shares.push(id);
     }
@@ -462,7 +502,7 @@ export class SolidarityLog {
     return rec;
   }
 
-  private snapshot(channelId: string): ChannelSnapshot | undefined {
+  private snapshot(channelId: string, withVoucher = false): ChannelSnapshot | undefined {
     const cid = channelId.toLowerCase();
     const state = this.chain.channelState(cid);
     const known = this.channels.get(cid);
@@ -476,8 +516,8 @@ export class SolidarityLog {
       chargedCumulativeAmount: (known?.charged ?? state?.totalClaimed ?? 0n).toString(),
     };
     // The last voucher the log holds, so a client can resync after a cumulative-mismatch
-    // (the binding's Corrective 402 carries the same pair in extra.voucherState).
-    if (known?.latestVoucher) {
+    // (the binding's Corrective 402 carries the same pair in extra.voucherState). Only then.
+    if (withVoucher && known?.latestVoucher) {
       snap.signedMaxClaimable = known.latestVoucher.maxClaimableAmount;
       snap.signature = known.latestVoucher.signature;
     }
@@ -488,20 +528,33 @@ export class SolidarityLog {
     const ex = rec.exact as NonNullable<ShareRecord["exact"]>;
     try {
       const r = await this.chain.submitExact(ex.accepted, ex.payload);
-      if (r.ok) {
-        ex.transaction = r.transaction;
-        rec.state = "collected";
-        this.addSettlement(rec.period, formatSettlement({ fund: rec.fund, asset: rec.asset, ref: `exact:${r.transaction}`, amount: rec.amount }));
-      } else {
-        // "An accepted exact share whose transfer fails (it expired, it was cancelled, or the
-        // payer's balance was too low) is uncollected."
+      let transaction = r.ok ? r.transaction : undefined;
+      if (!r.ok) {
         ex.error = r.error;
+        // Anyone holding the signed authorization can submit it, the relaying seller among them.
+        // If it was executed and paid the share's value to the fund, the share is collected all
+        // the same, with that transaction as its reference.
+        transaction = await this.executedElsewhere(ex, rec.amount);
+      }
+      if (transaction) {
+        ex.transaction = transaction;
+        rec.state = "collected";
+        this.addSettlement(rec.period, formatSettlement({ fund: rec.fund, asset: rec.asset, ref: `exact:${transaction}`, amount: rec.amount }));
+      } else {
+        // "An accepted exact share whose transfer never executes (it expired, it was cancelled,
+        // or the payer's balance was too low) is uncollected."
         rec.state = "uncollected";
       }
     } catch (e) {
       ex.error = (e as Error).message;
       rec.state = "uncollected";
     }
+  }
+
+  private async executedElsewhere(ex: NonNullable<ShareRecord["exact"]>, amount: bigint): Promise<string | undefined> {
+    const t = await this.chain.findExactTransfer?.(ex.accepted, ex.payload);
+    if (!t || !sameAccount(t.token, ex.accepted.asset) || !sameAccount(t.to, ex.accepted.payTo) || t.value !== amount) return undefined;
+    return t.transaction;
   }
 
   private addSettlement(period: string, entry: string): void {
@@ -542,6 +595,7 @@ export class SolidarityLog {
     if (onChain > cr.claimedByLog) {
       for (const rec of queued) if (batchOf(rec).from < onChain) rec.state = "uncollected";
       cr.claimedByLog = onChain;
+      if (cr.recorded < onChain) cr.recorded = onChain;
       if (cr.charged < onChain) cr.charged = onChain; // a voucher can only build on what is claimed
     }
 
@@ -560,12 +614,15 @@ export class SolidarityLog {
       }
     }
     const target = covered.reduce((t, r) => (batchOf(r).to > t ? batchOf(r).to : t), cr.claimedByLog);
-    if (lost) cr.charged = target;
+    if (lost) {
+      cr.recorded = target;
+      cr.charged = target;
+    }
     if (covered.length === 0 || target === cr.claimedByLog) return;
 
     const r = await this.chain.claim(cr.channelId, cr.latestVoucher, target);
-    // A failed claim on a channel that can still pay is retried at the next claim or at
-    // close; its shares stay queued (closePeriod refuses to close over them).
+    // A failed claim on a channel that can still pay is retried at the next claim or at close;
+    // its shares stay queued until the claim grace runs out (see closePeriod).
     if (!r.ok) return;
     const byPeriod = new Map<string, bigint>();
     for (const rec of covered) {
@@ -584,6 +641,13 @@ export class SolidarityLog {
    * Close period P: claim outstanding vouchers, leave out uncollected shares,
    * build the batch and settlements file, and sign a statement whose
    * `previous` is the hash of the previous period's payload.
+   *
+   * While a claim keeps failing, closing refuses (try again) until the claim
+   * grace after P ends has run out. Then a share still queued is uncollected,
+   * and so is every later share on its channel, since claims are cumulative;
+   * the log lowers that channel's chargedCumulativeAmount to what it has
+   * claimed, as for a channel that can no longer pay. One stuck claim can then
+   * never hold back P's statement, or every statement after it.
    */
   async closePeriod(period: string, issuedAt?: number): Promise<PublishedStatement> {
     const now = this.clock();
@@ -592,10 +656,32 @@ export class SolidarityLog {
     if (next && period !== next) throw new Error(`the next statement must be for ${next}`);
     await this.claimOutstanding();
     const inPeriod = [...this.shares.values()].filter((s) => s.period === period);
-    if (inPeriod.some((s) => s.state === "queued")) throw new Error(`unresolved shares in ${period} (a claim failed; try again)`);
+    const stuck = inPeriod.filter((s) => s.state === "queued");
+    if (stuck.length > 0) {
+      if (now < periodStart(nextPeriod(period)) + this.claimGraceSeconds) throw new Error(`unresolved shares in ${period} (a claim failed; try again)`);
+      await this.giveUp(stuck);
+    }
     // Uncollected shares are removed before the tree is built.
     const lines = inPeriod.filter((s) => s.state === "collected").map((s) => s.line);
     return this.book.close(period, lines, issuedAt ?? Math.max(now, periodStart(nextPeriod(period))));
+  }
+
+  private async giveUp(stuck: ShareRecord[]): Promise<void> {
+    for (const rec of stuck) {
+      if (!rec.batch) {
+        rec.state = "uncollected"; // an exact transfer that never confirmed
+        continue;
+      }
+      const cr = this.channels.get(rec.batch.channelId) as ChannelRecord;
+      await this.withChannelLock(cr.channelId, async () => {
+        for (const id of cr.shares) {
+          const r = this.shares.get(id) as ShareRecord;
+          if (r.state === "queued") r.state = "uncollected";
+        }
+        cr.recorded = cr.claimedByLog;
+        cr.charged = cr.claimedByLog;
+      });
+    }
   }
 
   /** Attach a witness or fund cosignature to a published statement. */
@@ -660,6 +746,18 @@ export function purchaseBasis(
       break;
   }
   return basis === undefined ? { ok: false } : { ok: true, basis };
+}
+
+/** The share's scheme, from a payment that may be malformed. */
+function shareScheme(info: SolidarityInfo): unknown {
+  return (info.payment as { accepted?: { scheme?: unknown } } | undefined)?.accepted?.scheme;
+}
+
+/** The channel a batch-settlement share's voucher names, if it names one. */
+function voucherChannelId(info: SolidarityInfo): string | undefined {
+  if (shareScheme(info) !== "batch-settlement") return undefined;
+  const id = (info.payment as { payload?: { voucher?: { channelId?: unknown } } } | undefined)?.payload?.voucher?.channelId;
+  return typeof id === "string" ? id : undefined;
 }
 
 /** Two `extra` objects are the same terms: equal JSON, with EVM hex compared case-insensitively. */

@@ -188,3 +188,16 @@ test("declaration helper rejects malformed or duplicate logs entries", () => {
   assert.throws(() => S.declareSolidarityExtension([{ network: NET, scheme: "exact", log: LOG }, { network: NET, scheme: "exact", log: LOG }]));
   assert.equal(S.conventionalLogUrl("https://facilitator.example/"), "https://facilitator.example/solidarity");
 });
+
+test("the cap's asset and the fund's network decide: no share in another asset, or for a fund on another chain", async () => {
+  const OTHER = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const withOther: LogDescriptor = { ...DESCRIPTOR, accepts: [...(DESCRIPTOR.accepts ?? []), { network: NET, asset: OTHER.toLowerCase(), scheme: "exact", maxTimeoutSeconds: 60, minAmount: "1", extra: { name: "USD Coin", version: "2" } }] };
+  const c = { ...ctx(), descriptor: withOther };
+  const other = await S.buildShare(c, { declared, accepted: { ...req("48000000"), asset: OTHER } });
+  assert.ok(!other.attached && /another asset/.test(other.why), "the log lists that asset; only the cap's asset rule refuses it");
+  assert.ok((await S.buildShare(c, { declared, accepted: req("48000000") })).attached, "the cap's own asset still works");
+  const onBase = "eip155:8453:0x000000000000000000000000000000000000f00d";
+  assert.ok(DESCRIPTOR.funds.includes(onBase), "the log lists the fund; only the network rule refuses it");
+  const d = await S.buildShare(ctx({ ...POLICY, fund: onBase }), { declared, accepted: req("48000000") });
+  assert.ok(!d.attached && /another network/.test(d.why));
+});

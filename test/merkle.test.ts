@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { buildTree, EMPTY_ROOT_HEX, merkleRoot, verifyInclusion } from "../src/solidarity/merkle.ts";
+import { buildTree, EMPTY_ROOT_HEX, leafHash, merkleRoot, nodeHash, toHex, verifyInclusion } from "../src/solidarity/merkle.ts";
 import { buildBatch } from "../src/solidarity/ledger.ts";
 import { conformance, siteFile } from "./helpers.ts";
 
@@ -85,4 +85,15 @@ test("agrees with the site's merkle.js on the spec lines and the conformance bat
     const t = await site.buildTree(leaves.slice(0, n));
     assert.equal(t.rootHex, merkleRoot(leaves.slice(0, n)));
   }
+});
+
+test("inclusion proofs past 2^31 leaves: arithmetic, not 32-bit bitwise operators", () => {
+  // The last leaf of a tree of 2^k + 1 leaves sits alone on the right: its audit path is the left subtree's root.
+  const left = new Uint8Array(32).fill(7);
+  const root = toHex(nodeHash(left, leafHash("last")));
+  for (const k of [31, 32, 40]) {
+    assert.equal(verifyInclusion("last", 2 ** k, 2 ** k + 1, [toHex(left)], root), true, `2^${k}`);
+    assert.equal(verifyInclusion("other", 2 ** k, 2 ** k + 1, [toHex(left)], root), false, `2^${k}`);
+  }
+  assert.equal(verifyInclusion("last", 2 ** 53, 2 ** 53 + 1, [toHex(left)], root), false, "beyond safe integers: refused");
 });
