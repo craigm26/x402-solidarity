@@ -8,7 +8,8 @@
  * neither is the optional findExactTransfer: a share whose authorization
  * someone else submitted first is reported uncollected here.
  *
- * UNTESTED against a live chain.
+ * Not yet run against a live chain. SIMULATE=1 in index.ts checks the same
+ * transferWithAuthorization call against the deployed contract with eth_call.
  */
 
 import type { WalletClient } from "viem";

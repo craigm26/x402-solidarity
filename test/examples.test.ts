@@ -55,9 +55,9 @@ test("no em or en dashes anywhere in the repository's text", () => {
 
 test("README says plainly: proposal, simulated, not affiliated, no fund, testnet only", () => {
   const readme = readFileSync(join(ROOT, "README.md"), "utf8");
-  for (const phrase of [/not part of x402/i, /not affiliated/i, /no fund exists/i, /simulated/i, /no money moves/i, /testnet only/i, /untested against a live chain/i, /placeholder/i, /Apache-2\.0/]) {
+  for (const phrase of [/not part of x402/i, /not affiliated/i, /no fund exists/i, /simulated/i, /no money moves/i, /testnet only/i, /not yet broadcast/i, /placeholder/i, /Apache-2\.0/]) {
     assert.match(readme, phrase);
   }
   const live = readFileSync(join(ROOT, "examples/live-base-sepolia/README.md"), "utf8");
-  for (const phrase of [/testnet only/i, /untested against a live chain/i, /no fund exists/i, /placeholder/i]) assert.match(live, phrase);
+  for (const phrase of [/testnet only/i, /not yet broadcast/i, /no fund exists/i, /placeholder/i]) assert.match(live, phrase);
 });

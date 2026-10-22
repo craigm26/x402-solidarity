@@ -8,7 +8,7 @@ Please read this first:
 - **Not affiliated.** It is not affiliated with or endorsed by any company, the UN or any fund. I take no money from it.
 - **No fund exists.** Every fund address here is a placeholder (`0x...f00d`, `0x...beef`).
 - **Simulated.** Everything is tested offline against a simulated chain. No money moves.
-- **One live script, never run.** `examples/live-base-sepolia/` would settle a share on Base Sepolia. It is testnet only and untested against a live chain.
+- **One live script, checked but not yet broadcast.** `examples/live-base-sepolia/` settles a purchase and its share on Base Sepolia, testnet only. Its `SIMULATE=1` mode runs both transfers against the deployed USDC contract with `eth_call`, needing no funds and sending nothing. That passes, and a test also checks five ways it must fail. No transaction has been sent yet.
 - **Written with AI assistance** (Claude Code).
 
 The proposal and its simulated demos live at https://craigmerry.com/solidarity-levy/. The spec (draft 2, 2026-10-22) is the source of truth; where this code and the spec disagree, the spec wins and the code has a bug. It is three documents:
@@ -48,6 +48,8 @@ It also runs in Cloudflare Workers with the `nodejs_compat` flag. Signing never 
 
 - `X402_DIR`: a checkout of the x402 repository (x402-foundation/x402), for the test that checks the cited USDC and batch-settlement constants. Without it, that test skips.
 
+- `BASE_SEPOLIA_RPC_URL`: a Base Sepolia RPC endpoint such as `https://sepolia.base.org`, for the test that runs signed shares against the deployed USDC contract with `eth_call` (it sends nothing). Without it, that test skips.
+
 ## What is here
 
 ```
@@ -70,7 +72,7 @@ src/solidarity/       the extension, laid out like @x402/extensions/payment-iden
   processor.ts        processor mode (card and bank rails), as bookkeeping only
 src/sim/chain.ts      the simulated chain: USDC with EIP-3009, a batch-settlement escrow
 conformance/          JSON test vectors for other implementations (see below)
-examples/             the offline flow, the Base Sepolia script, and a Cloudflare Workers check
+examples/             the offline flow, the Base Sepolia script (simulate, facilitator or RPC), and a Cloudflare Workers check
 scripts/              the conformance generator
 test/                 node:test suites
 ```
@@ -117,7 +119,7 @@ USDC on Base Sepolia is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, with EIP-7
 - It does not open batch-settlement channels. As `attestation.md` says, the channel is funded outside the extension, and a share with a `deposit` payload is skipped with `bad-payment`.
 - It does not resolve `did:web` or DNS keys. Verifiers pass a key resolver, which stands for that lookup and so answers for the current key only. A retired key is taken from the descriptor's `jwk`, and only with a cosignature the verifier requires.
 - It refuses `batch-settlement` channels whose `payerAuthorizer` is zero. For those the contract checks the payer's signature with EIP-1271 when the payer has code, which this offline check cannot do, so a voucher that looks valid here could make every claim revert.
-- The Base Sepolia script's chain does not implement `findExactTransfer`, so there a share whose authorization someone else submitted first is reported uncollected. The simulated chain implements it.
+- The Base Sepolia script's two chains (RPC and facilitator) do not implement `findExactTransfer`, so there a share whose authorization someone else submitted first is reported uncollected. The simulated chain implements it.
 - It does not serve HTTP or persist anything. The log's five endpoints are a function over memory.
 - Processor mode is arithmetic and bookkeeping only. It charges no one and pays no one.
 - No consistency proofs: `attestation.md` closes every batch for good, so it does not need them.
