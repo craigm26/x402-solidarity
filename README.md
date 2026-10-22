@@ -34,11 +34,15 @@ node examples/e2e-offline.ts
 - `SOLIDARITY_SITE_DIR`: a folder with the site's checkers and the three spec documents, laid out as on the site. Without it, the tests that run `merkle.js` and `verify.py` against the conformance files, and the one that compares the schemas here with the spec's, skip. To fetch them:
 
   ```
-  mkdir -p site/spec
-  for f in merkle.js verify.py; do curl -fsS -o site/$f https://craigmerry.com/solidarity-levy/$f; done
-  for f in solidarity.md attestation.md processor-mode.md; do curl -fsS -o site/spec/$f https://craigmerry.com/solidarity-levy/spec/$f; done
-  SOLIDARITY_SITE_DIR=$PWD/site npm test
+  mkdir -p site/spec && (
+    set -e
+    for f in merkle.js verify.py spec/solidarity.md spec/attestation.md spec/processor-mode.md; do
+      curl -fsS -o site/$f https://craigmerry.com/solidarity-levy/$f
+    done
+  ) && SOLIDARITY_SITE_DIR=$PWD/site npm test
   ```
+
+  A failed download stops it before the tests run. `site/` is in `.gitignore`.
 
 - `X402_DIR`: a checkout of the x402 repository (x402-foundation/x402), for the test that checks the cited USDC and batch-settlement constants. Without it, that test skips.
 
@@ -108,7 +112,7 @@ USDC on Base Sepolia is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, with EIP-7
 ## What it does not do
 
 - It checks signatures offline with viem (`verifyTypedData`, which is ecrecover). It does not read balances or nonce state before accepting a share, and it does not handle smart-wallet signatures (ERC-1271, ERC-6492). A real facilitator would add its usual chain reads.
-- It does not open batch-settlement channels. The owner deposits out of band; a share with a `deposit` payload is skipped.
+- It does not open batch-settlement channels. As `attestation.md` says, the channel is funded outside the extension, and a share with a `deposit` payload is skipped with `bad-payment`.
 - It does not resolve `did:web` or DNS keys. Verifiers pass a key resolver, which stands for that lookup and so answers for the current key only. A retired key is taken from the descriptor's `jwk`, and only with a cosignature the verifier requires.
 - It refuses `batch-settlement` channels whose `payerAuthorizer` is zero. For those the contract checks the payer's signature with EIP-1271 when the payer has code, which this offline check cannot do, so a voucher that looks valid here could make every claim revert.
 - The Base Sepolia script's chain does not implement `findExactTransfer`, so there a share whose authorization someone else submitted first is reported uncollected. The simulated chain implements it.

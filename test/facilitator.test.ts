@@ -404,6 +404,27 @@ test("a batch-settlement share on a settlement_pending purchase is skipped at on
   assert.equal(next.outcome?.status, "accepted", "the next voucher builds on the same base without a mismatch");
 });
 
+test("a batch-settlement share with a deposit payload is skipped with bad-payment, and the log executes nothing for it", async () => {
+  // attestation.md, "Optional share kind: `batch-settlement`": the channel is funded outside the
+  // extension, and "a share whose payload `type` is not \"voucher\" ... is skipped with `bad-payment`".
+  const w = await world();
+  w.chain.deposit(w.config, 1_000_000n);
+  const ch = S.openClientChannel(NET, w.config);
+  await batchShare(w, ch, "2000000");
+  const before = w.chain.log.length;
+  const accepted = w.req("3000000");
+  const info = await w.share(accepted, { kind: "batch-settlement", channel: ch });
+  const payment = info.payment as { accepted: PaymentRequirements; payload: Record<string, unknown> };
+  const deposit = { ...payment.payload, type: "deposit", deposit: { amount: "1000000", authorization: {} } };
+  const r = await w.log.onSettled(w.payload(accepted, { ...info, payment: { ...payment, payload: deposit } }), accepted, w.ok());
+  assert.deepEqual([r.outcome?.status, r.outcome?.reason], ["skipped", "bad-payment"]);
+  assert.equal(w.chain.log.length, before, "no deposit, transfer or claim on chain");
+  assert.ok(S.applyOutcomeToChannel(ch, r.outcome));
+  assert.equal(ch.chargedCumulativeAmount, "2000", "the client keeps its state");
+  const next = await batchShare(w, ch, "3000000");
+  assert.equal(next.outcome?.status, "accepted", "a voucher on the same base is accepted after it");
+});
+
 test("a batch-settlement share skipped before its checks still carries the channel snapshot, without the voucher", async () => {
   const w = await world();
   w.chain.deposit(w.config, 1_000_000n);

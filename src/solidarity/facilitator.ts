@@ -416,7 +416,8 @@ export class SolidarityLog {
       throw new Skip("bad-payment", "terms differ from the descriptor entry");
     }
 
-    // `rate`, written as a decimal, is at most 0.01. A rate in any other form fails the schema.
+    // "`rate`, if it is a decimal string (digits, optionally a point and more digits), is at most 0.01";
+    // a rate in any other form fails the schema.
     if (typeof info.rate !== "string" || !RATE_PATTERN.test(info.rate)) {
       if (isDecimal(info.rate) && compareDecimal(info.rate, "0.01") > 0) throw new Skip("over-rate");
       throw new Skip("bad-payment", "rate is not a canonical decimal from 0.000001 to 0.01");
@@ -556,8 +557,8 @@ export class SolidarityLog {
         rec.state = "collected";
         this.addSettlement(rec.period, formatSettlement({ fund: rec.fund, asset: rec.asset, ref: `exact:${transaction}`, amount: rec.amount }));
       } else {
-        // "An accepted exact share whose transfer never executes (it expired, it was cancelled,
-        // or the payer's balance was too low) is uncollected."
+        // ("Share kinds": "If the transfer never executes (expired, cancelled, or the balance was too
+        // low), the share is uncollected.")
         rec.state = "uncollected";
       }
     } catch (e) {
@@ -593,7 +594,7 @@ export class SolidarityLog {
     }
   }
 
-  /** "The log MUST claim outstanding share vouchers when it sees a withdrawal initiated." */
+  /** "The log MUST claim outstanding share vouchers when it sees a withdrawal initiated, ..." */
   async onWithdrawalInitiated(channelId: string): Promise<void> {
     await this.claimOutstanding(channelId);
   }
