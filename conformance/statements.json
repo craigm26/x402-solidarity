@@ -1,0 +1,204 @@
+{
+  "note": "Three chained monthly statements. 2026-10 and 2026-11 are the spec's draft 2 vectors; 2026-12 is the batch from payloads.json. Each is cosigned by the witness (TEST 2); 2026-12 is also cosigned by fund 0x...f00d (TEST 3), whose cosignature attests its settlement references in the simulated chain.",
+  "descriptor": {
+    "version": 2,
+    "log": "https://log.example/solidarity",
+    "funds": [
+      "eip155:84532:0x000000000000000000000000000000000000beef",
+      "eip155:84532:0x000000000000000000000000000000000000f00d"
+    ],
+    "accepts": [
+      {
+        "network": "eip155:84532",
+        "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        "scheme": "batch-settlement",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "receiverAuthorizer": "0x3333333333333333333333333333333333333333",
+          "withdrawDelay": 86400,
+          "name": "USDC",
+          "version": "2"
+        }
+      },
+      {
+        "network": "eip155:84532",
+        "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        "scheme": "exact",
+        "maxTimeoutSeconds": 60,
+        "minAmount": "10000",
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      }
+    ],
+    "minWithdrawDelay": 86400,
+    "keys": [
+      {
+        "kid": "did:web:log.example#test-only-1",
+        "from": "2026-10",
+        "until": null
+      }
+    ],
+    "witnesses": [
+      "did:web:witness.example"
+    ]
+  },
+  "keys": {
+    "log": {
+      "kid": "did:web:log.example#test-only-1",
+      "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "rfc8032": "7.1 TEST 1"
+    },
+    "witness": {
+      "kid": "did:web:witness.example#test-only-2",
+      "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "rfc8032": "7.1 TEST 2"
+    },
+    "fund": {
+      "kid": "did:web:fund.example#test-only-3",
+      "publicKeyHex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "rfc8032": "7.1 TEST 3",
+      "fund": "eip155:84532:0x000000000000000000000000000000000000f00d"
+    }
+  },
+  "periods": [
+    {
+      "period": "2026-10",
+      "payload": {
+        "version": 2,
+        "log": "https://log.example/solidarity",
+        "period": "2026-10",
+        "size": 3,
+        "root": "ec6cb7dd91af90ccda9646000fbee7ebec31705637b8159a7381a58adf6e7f36",
+        "totals": [
+          {
+            "fund": "eip155:84532:0x000000000000000000000000000000000000beef",
+            "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+            "lines": 1,
+            "amount": "300000"
+          },
+          {
+            "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+            "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+            "lines": 2,
+            "amount": "49250"
+          }
+        ],
+        "settlements": "7b4feff463c31223dc18c6ab3b02f137b3878cc79cf7683ed3095a3429251bfd",
+        "previous": null,
+        "issuedAt": 1793836800
+      },
+      "jcs": "{\"issuedAt\":1793836800,\"log\":\"https://log.example/solidarity\",\"period\":\"2026-10\",\"previous\":null,\"root\":\"ec6cb7dd91af90ccda9646000fbee7ebec31705637b8159a7381a58adf6e7f36\",\"settlements\":\"7b4feff463c31223dc18c6ab3b02f137b3878cc79cf7683ed3095a3429251bfd\",\"size\":3,\"totals\":[{\"amount\":\"300000\",\"asset\":\"0x036cbd53842c5426634e7929541ec2318f3dcf7e\",\"fund\":\"eip155:84532:0x000000000000000000000000000000000000beef\",\"lines\":1},{\"amount\":\"49250\",\"asset\":\"0x036cbd53842c5426634e7929541ec2318f3dcf7e\",\"fund\":\"eip155:84532:0x000000000000000000000000000000000000f00d\",\"lines\":2}],\"version\":2}",
+      "sha256": "f5a17de9204425442c039eebd5fa1c309f81045ab4f0fba7a15c12a88897a158",
+      "size": 3,
+      "root": "ec6cb7dd91af90ccda9646000fbee7ebec31705637b8159a7381a58adf6e7f36",
+      "totals": [
+        {
+          "fund": "eip155:84532:0x000000000000000000000000000000000000beef",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+          "lines": 1,
+          "amount": "300000"
+        },
+        {
+          "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+          "lines": 2,
+          "amount": "49250"
+        }
+      ],
+      "published": {
+        "statement": {
+          "format": "jws",
+          "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6bG9nLmV4YW1wbGUjdGVzdC1vbmx5LTEifQ.eyJpc3N1ZWRBdCI6MTc5MzgzNjgwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMCIsInByZXZpb3VzIjpudWxsLCJyb290IjoiZWM2Y2I3ZGQ5MWFmOTBjY2RhOTY0NjAwMGZiZWU3ZWJlYzMxNzA1NjM3YjgxNTlhNzM4MWE1OGFkZjZlN2YzNiIsInNldHRsZW1lbnRzIjoiN2I0ZmVmZjQ2M2MzMTIyM2RjMThjNmFiM2IwMmYxMzdiMzg3OGNjNzljZjc2ODNlZDMwOTVhMzQyOTI1MWJmZCIsInNpemUiOjMsInRvdGFscyI6W3siYW1vdW50IjoiMzAwMDAwIiwiYXNzZXQiOiIweDAzNmNiZDUzODQyYzU0MjY2MzRlNzkyOTU0MWVjMjMxOGYzZGNmN2UiLCJmdW5kIjoiZWlwMTU1Ojg0NTMyOjB4MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwYmVlZiIsImxpbmVzIjoxfSx7ImFtb3VudCI6IjQ5MjUwIiwiYXNzZXQiOiIweDAzNmNiZDUzODQyYzU0MjY2MzRlNzkyOTU0MWVjMjMxOGYzZGNmN2UiLCJmdW5kIjoiZWlwMTU1Ojg0NTMyOjB4MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwZjAwZCIsImxpbmVzIjoyfV0sInZlcnNpb24iOjJ9.ey5shRywBFp9S0q9C4HzoCcLepc3-DHBrp-c34GM2fdTDapRfahOg78n3vOIycogjxb_2I8C9yvHf5UsheS6BA"
+        },
+        "cosignatures": [
+          {
+            "format": "jws",
+            "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6d2l0bmVzcy5leGFtcGxlI3Rlc3Qtb25seS0yIn0.eyJpc3N1ZWRBdCI6MTc5MzgzNjgwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMCIsInByZXZpb3VzIjpudWxsLCJyb290IjoiZWM2Y2I3ZGQ5MWFmOTBjY2RhOTY0NjAwMGZiZWU3ZWJlYzMxNzA1NjM3YjgxNTlhNzM4MWE1OGFkZjZlN2YzNiIsInNldHRsZW1lbnRzIjoiN2I0ZmVmZjQ2M2MzMTIyM2RjMThjNmFiM2IwMmYxMzdiMzg3OGNjNzljZjc2ODNlZDMwOTVhMzQyOTI1MWJmZCIsInNpemUiOjMsInRvdGFscyI6W3siYW1vdW50IjoiMzAwMDAwIiwiYXNzZXQiOiIweDAzNmNiZDUzODQyYzU0MjY2MzRlNzkyOTU0MWVjMjMxOGYzZGNmN2UiLCJmdW5kIjoiZWlwMTU1Ojg0NTMyOjB4MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwYmVlZiIsImxpbmVzIjoxfSx7ImFtb3VudCI6IjQ5MjUwIiwiYXNzZXQiOiIweDAzNmNiZDUzODQyYzU0MjY2MzRlNzkyOTU0MWVjMjMxOGYzZGNmN2UiLCJmdW5kIjoiZWlwMTU1Ojg0NTMyOjB4MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwZjAwZCIsImxpbmVzIjoyfV0sInZlcnNpb24iOjJ9.W7MS_Rogc6unqghCbAQHQke0u23o_0dWWhbNldRvveDt4oVPikWDJueZ2Ia57vwnC9s55qVIVfWsyd_OM-_qAQ"
+          }
+        ]
+      }
+    },
+    {
+      "period": "2026-11",
+      "payload": {
+        "version": 2,
+        "log": "https://log.example/solidarity",
+        "period": "2026-11",
+        "size": 0,
+        "root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "totals": [],
+        "settlements": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "previous": "f5a17de9204425442c039eebd5fa1c309f81045ab4f0fba7a15c12a88897a158",
+        "issuedAt": 1796428800
+      },
+      "jcs": "{\"issuedAt\":1796428800,\"log\":\"https://log.example/solidarity\",\"period\":\"2026-11\",\"previous\":\"f5a17de9204425442c039eebd5fa1c309f81045ab4f0fba7a15c12a88897a158\",\"root\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"settlements\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"totals\":[],\"version\":2}",
+      "sha256": "a5f5f7a6e549206fbf2a589d0e3b85a305091644fe1d3484af25d9964d8fd263",
+      "size": 0,
+      "root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "totals": [],
+      "published": {
+        "statement": {
+          "format": "jws",
+          "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6bG9nLmV4YW1wbGUjdGVzdC1vbmx5LTEifQ.eyJpc3N1ZWRBdCI6MTc5NjQyODgwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMSIsInByZXZpb3VzIjoiZjVhMTdkZTkyMDQ0MjU0NDJjMDM5ZWViZDVmYTFjMzA5ZjgxMDQ1YWI0ZjBmYmE3YTE1YzEyYTg4ODk3YTE1OCIsInJvb3QiOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1Iiwic2V0dGxlbWVudHMiOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1Iiwic2l6ZSI6MCwidG90YWxzIjpbXSwidmVyc2lvbiI6Mn0.oY_VQ6BPU-TofmEVXLkoKknroZHPJpO6ZVOzwg5oPrcH_Yf3q9BSiMItZ6KXXjTE328oIp9l4Tt7XtkceL3kAg"
+        },
+        "cosignatures": [
+          {
+            "format": "jws",
+            "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6d2l0bmVzcy5leGFtcGxlI3Rlc3Qtb25seS0yIn0.eyJpc3N1ZWRBdCI6MTc5NjQyODgwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMSIsInByZXZpb3VzIjoiZjVhMTdkZTkyMDQ0MjU0NDJjMDM5ZWViZDVmYTFjMzA5ZjgxMDQ1YWI0ZjBmYmE3YTE1YzEyYTg4ODk3YTE1OCIsInJvb3QiOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1Iiwic2V0dGxlbWVudHMiOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1Iiwic2l6ZSI6MCwidG90YWxzIjpbXSwidmVyc2lvbiI6Mn0.ChzbfdQyspCWv_hRlz9rsmHMNOumhFkijCnFfto5Ui9m23Bik-mksnBB6Ostk8EclWGo4LKYW2wUaToisN5wDw"
+          }
+        ]
+      }
+    },
+    {
+      "period": "2026-12",
+      "payload": {
+        "version": 2,
+        "log": "https://log.example/solidarity",
+        "period": "2026-12",
+        "size": 5,
+        "root": "44a91dbb0faf7640f68f0e78cc5418669a279bae695769aec4a2506e6f60901e",
+        "totals": [
+          {
+            "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+            "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+            "lines": 5,
+            "amount": "105000"
+          }
+        ],
+        "settlements": "c9235c35f9c9c9cdd5d2e9dfd93142db7d54a4921f77aa37e31e8407d88ab764",
+        "previous": "a5f5f7a6e549206fbf2a589d0e3b85a305091644fe1d3484af25d9964d8fd263",
+        "issuedAt": 1799107200
+      },
+      "jcs": "{\"issuedAt\":1799107200,\"log\":\"https://log.example/solidarity\",\"period\":\"2026-12\",\"previous\":\"a5f5f7a6e549206fbf2a589d0e3b85a305091644fe1d3484af25d9964d8fd263\",\"root\":\"44a91dbb0faf7640f68f0e78cc5418669a279bae695769aec4a2506e6f60901e\",\"settlements\":\"c9235c35f9c9c9cdd5d2e9dfd93142db7d54a4921f77aa37e31e8407d88ab764\",\"size\":5,\"totals\":[{\"amount\":\"105000\",\"asset\":\"0x036cbd53842c5426634e7929541ec2318f3dcf7e\",\"fund\":\"eip155:84532:0x000000000000000000000000000000000000f00d\",\"lines\":5}],\"version\":2}",
+      "sha256": "f0070f365ee63ee68847a7b8e14cf9e972dace59e42eced81d9d21d55b6fc9d0",
+      "size": 5,
+      "root": "44a91dbb0faf7640f68f0e78cc5418669a279bae695769aec4a2506e6f60901e",
+      "totals": [
+        {
+          "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+          "lines": 5,
+          "amount": "105000"
+        }
+      ],
+      "published": {
+        "statement": {
+          "format": "jws",
+          "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6bG9nLmV4YW1wbGUjdGVzdC1vbmx5LTEifQ.eyJpc3N1ZWRBdCI6MTc5OTEwNzIwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMiIsInByZXZpb3VzIjoiYTVmNWY3YTZlNTQ5MjA2ZmJmMmE1ODlkMGUzYjg1YTMwNTA5MTY0NGZlMWQzNDg0YWYyNWQ5OTY0ZDhmZDI2MyIsInJvb3QiOiI0NGE5MWRiYjBmYWY3NjQwZjY4ZjBlNzhjYzU0MTg2NjlhMjc5YmFlNjk1NzY5YWVjNGEyNTA2ZTZmNjA5MDFlIiwic2V0dGxlbWVudHMiOiJjOTIzNWMzNWY5YzljOWNkZDVkMmU5ZGZkOTMxNDJkYjdkNTRhNDkyMWY3N2FhMzdlMzFlODQwN2Q4OGFiNzY0Iiwic2l6ZSI6NSwidG90YWxzIjpbeyJhbW91bnQiOiIxMDUwMDAiLCJhc3NldCI6IjB4MDM2Y2JkNTM4NDJjNTQyNjYzNGU3OTI5NTQxZWMyMzE4ZjNkY2Y3ZSIsImZ1bmQiOiJlaXAxNTU6ODQ1MzI6MHgwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBmMDBkIiwibGluZXMiOjV9XSwidmVyc2lvbiI6Mn0.eDQ97DIcCiB3qr9XT6r7MVs-OrjhLgEMNE_38qcuxFdcYq_9jlojkF-k5-897mp6qZF9ZCEFoNW9fR2W-XANBQ"
+        },
+        "cosignatures": [
+          {
+            "format": "jws",
+            "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6d2l0bmVzcy5leGFtcGxlI3Rlc3Qtb25seS0yIn0.eyJpc3N1ZWRBdCI6MTc5OTEwNzIwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMiIsInByZXZpb3VzIjoiYTVmNWY3YTZlNTQ5MjA2ZmJmMmE1ODlkMGUzYjg1YTMwNTA5MTY0NGZlMWQzNDg0YWYyNWQ5OTY0ZDhmZDI2MyIsInJvb3QiOiI0NGE5MWRiYjBmYWY3NjQwZjY4ZjBlNzhjYzU0MTg2NjlhMjc5YmFlNjk1NzY5YWVjNGEyNTA2ZTZmNjA5MDFlIiwic2V0dGxlbWVudHMiOiJjOTIzNWMzNWY5YzljOWNkZDVkMmU5ZGZkOTMxNDJkYjdkNTRhNDkyMWY3N2FhMzdlMzFlODQwN2Q4OGFiNzY0Iiwic2l6ZSI6NSwidG90YWxzIjpbeyJhbW91bnQiOiIxMDUwMDAiLCJhc3NldCI6IjB4MDM2Y2JkNTM4NDJjNTQyNjYzNGU3OTI5NTQxZWMyMzE4ZjNkY2Y3ZSIsImZ1bmQiOiJlaXAxNTU6ODQ1MzI6MHgwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBmMDBkIiwibGluZXMiOjV9XSwidmVyc2lvbiI6Mn0.1LJ2W-fy0Gvj8Tnj9UfhazdN06hK6DsxxWYIW0UvIW4ecxJd4rcP__dYkaxlMFqQOnVpTcuEWYcpTCyq4XzKCQ"
+          },
+          {
+            "format": "jws",
+            "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDp3ZWI6ZnVuZC5leGFtcGxlI3Rlc3Qtb25seS0zIn0.eyJpc3N1ZWRBdCI6MTc5OTEwNzIwMCwibG9nIjoiaHR0cHM6Ly9sb2cuZXhhbXBsZS9zb2xpZGFyaXR5IiwicGVyaW9kIjoiMjAyNi0xMiIsInByZXZpb3VzIjoiYTVmNWY3YTZlNTQ5MjA2ZmJmMmE1ODlkMGUzYjg1YTMwNTA5MTY0NGZlMWQzNDg0YWYyNWQ5OTY0ZDhmZDI2MyIsInJvb3QiOiI0NGE5MWRiYjBmYWY3NjQwZjY4ZjBlNzhjYzU0MTg2NjlhMjc5YmFlNjk1NzY5YWVjNGEyNTA2ZTZmNjA5MDFlIiwic2V0dGxlbWVudHMiOiJjOTIzNWMzNWY5YzljOWNkZDVkMmU5ZGZkOTMxNDJkYjdkNTRhNDkyMWY3N2FhMzdlMzFlODQwN2Q4OGFiNzY0Iiwic2l6ZSI6NSwidG90YWxzIjpbeyJhbW91bnQiOiIxMDUwMDAiLCJhc3NldCI6IjB4MDM2Y2JkNTM4NDJjNTQyNjYzNGU3OTI5NTQxZWMyMzE4ZjNkY2Y3ZSIsImZ1bmQiOiJlaXAxNTU6ODQ1MzI6MHgwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBmMDBkIiwibGluZXMiOjV9XSwidmVyc2lvbiI6Mn0.zTvNxzhPlRFGqHOeRk7OEPIe7FL3wmyyI1NOj3IL6rcA8lNLQvzQn7UCkJzO1CpYdS_7ui5cObsz2zmF5Ql2Ag"
+          }
+        ]
+      }
+    }
+  ]
+}

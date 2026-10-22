@@ -1,0 +1,179 @@
+{
+  "note": "Atomic units as decimal strings. floor throughout. rate must match ^0\\.(01|00[0-9]{0,3}[1-9])$.",
+  "cases": [
+    {
+      "fn": "shareMax",
+      "purchase": "48000000",
+      "rate": "0.001",
+      "capLeft": null,
+      "expected": "48000"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "48000000",
+      "rate": "0.01",
+      "capLeft": null,
+      "expected": "480000"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "48000000",
+      "rate": "0.000001",
+      "capLeft": null,
+      "expected": "48"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "999",
+      "rate": "0.001",
+      "capLeft": null,
+      "expected": "0"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "1000",
+      "rate": "0.001",
+      "capLeft": null,
+      "expected": "1"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "1999",
+      "rate": "0.001",
+      "capLeft": null,
+      "expected": "1"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "48000000",
+      "rate": "0.001",
+      "capLeft": "1250",
+      "expected": "1250"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "48000000",
+      "rate": "0.001",
+      "capLeft": "0",
+      "expected": "0"
+    },
+    {
+      "fn": "shareMax",
+      "purchase": "123456789012345678901234567890",
+      "rate": "0.0025",
+      "capLeft": null,
+      "expected": "308641972530864197253086419"
+    },
+    {
+      "fn": "recordedShare",
+      "signed": "48000",
+      "basis": "48000000",
+      "rate": "0.001",
+      "expected": "48000"
+    },
+    {
+      "fn": "recordedShare",
+      "signed": "10000",
+      "basis": "4000000",
+      "rate": "0.001",
+      "expected": "4000"
+    },
+    {
+      "fn": "recordedShare",
+      "signed": "60000",
+      "basis": "48000000",
+      "rate": "0.001",
+      "expected": "48000"
+    },
+    {
+      "fn": "recordedShare",
+      "signed": "5",
+      "basis": "4999",
+      "rate": "0.001",
+      "expected": "4"
+    },
+    {
+      "fn": "netCredit",
+      "refunded": "1000",
+      "rate": "0.01",
+      "originalShare": "48",
+      "expected": "10"
+    },
+    {
+      "fn": "netCredit",
+      "refunded": "48000000",
+      "rate": "0.001",
+      "originalShare": "48000",
+      "expected": "48000"
+    },
+    {
+      "fn": "netCredit",
+      "refunded": "99999999",
+      "rate": "0.001",
+      "originalShare": "48000",
+      "expected": "48000"
+    }
+  ],
+  "rates": [
+    {
+      "rate": "0.01",
+      "valid": true
+    },
+    {
+      "rate": "0.001",
+      "valid": true
+    },
+    {
+      "rate": "0.000001",
+      "valid": true
+    },
+    {
+      "rate": "0.0025",
+      "valid": true
+    },
+    {
+      "rate": "0.009999",
+      "valid": true
+    },
+    {
+      "rate": "0.010",
+      "valid": false
+    },
+    {
+      "rate": "0.0100",
+      "valid": false
+    },
+    {
+      "rate": "0.02",
+      "valid": false
+    },
+    {
+      "rate": "0.0000001",
+      "valid": false
+    },
+    {
+      "rate": "0.1",
+      "valid": false
+    },
+    {
+      "rate": "1",
+      "valid": false
+    },
+    {
+      "rate": "0",
+      "valid": false
+    },
+    {
+      "rate": "0.000000",
+      "valid": false
+    },
+    {
+      "rate": ".001",
+      "valid": false
+    },
+    {
+      "rate": "0.00100",
+      "valid": false
+    }
+  ]
+}

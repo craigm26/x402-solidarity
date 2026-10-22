@@ -1,0 +1,228 @@
+{
+  "note": "Owner policies (never sent on the wire). policyHash is hex SHA-256 of the JCS bytes, for the holder's own records only.",
+  "policyHash": {
+    "policy": {
+      "version": 2,
+      "rate": "0.001",
+      "cap": {
+        "amount": "5000000",
+        "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+      },
+      "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+      "logs": [
+        "https://log.example/solidarity"
+      ],
+      "refunds": "keep",
+      "since": "2026-10-21T09:12:00Z"
+    },
+    "sha256": "c47f9ddd96b047525323d9c68c2c581108470b3628c0f6395e291c565dff0060"
+  },
+  "cases": [
+    {
+      "name": "separate-keep",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.001",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": true,
+      "problems": []
+    },
+    {
+      "name": "separate-net",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.001",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "net",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "separate mode is keep only"
+      ]
+    },
+    {
+      "name": "processor-net",
+      "mode": "processor",
+      "policy": {
+        "version": 2,
+        "rate": "0.001",
+        "cap": {
+          "amount": "500",
+          "asset": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "net",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": true,
+      "problems": []
+    },
+    {
+      "name": "rate-too-high",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.02",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "rate must be from 0.000001 to 0.01 with no trailing zeros"
+      ]
+    },
+    {
+      "name": "rate-trailing-zero",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.0010",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "rate must be from 0.000001 to 0.01 with no trailing zeros"
+      ]
+    },
+    {
+      "name": "cap-not-integer",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.001",
+        "cap": {
+          "amount": "5.00",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "cap.amount must be a positive integer string (atomic units)"
+      ]
+    },
+    {
+      "name": "fund-not-caip10",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.001",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "fund must be a CAIP-10 account in separate mode"
+      ]
+    },
+    {
+      "name": "logs-not-https",
+      "mode": "separate",
+      "policy": {
+        "version": 2,
+        "rate": "0.001",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "http://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "logs must be a list of https URLs"
+      ]
+    },
+    {
+      "name": "version-1",
+      "mode": "separate",
+      "policy": {
+        "version": 1,
+        "rate": "0.001",
+        "cap": {
+          "amount": "5000000",
+          "asset": "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+        },
+        "fund": "eip155:84532:0x000000000000000000000000000000000000f00d",
+        "logs": [
+          "https://log.example/solidarity"
+        ],
+        "refunds": "keep",
+        "since": "2026-10-21T09:12:00Z"
+      },
+      "valid": false,
+      "problems": [
+        "version must be 2"
+      ]
+    }
+  ],
+  "processorConstraint": {
+    "type": "solidarity",
+    "holder": "https://processor.example",
+    "rate": "0.001",
+    "cap": {
+      "amount": "5.00",
+      "currency": "USD"
+    },
+    "fund": "https://fund.example/solidarity",
+    "refunds": "keep",
+    "log": "https://processor.example/solidarity"
+  }
+}

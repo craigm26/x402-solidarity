@@ -1,0 +1,19 @@
+{
+  "name": "x402-solidarity",
+  "version": "0.2.0",
+  "description": "Reference implementation of the draft 2 solidarity extension for x402: share signing, facilitator checks, and a signed, witnessed RFC 6962 ledger. Simulated; no fund exists.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "vectors": "node scripts/generate-conformance.ts",
+    "e2e": "node examples/e2e-offline.ts"
+  },
+  "dependencies": {
+    "viem": "2.48.11"
+  }
+}
