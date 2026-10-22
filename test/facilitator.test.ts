@@ -403,3 +403,46 @@ test("a batch-settlement share on a settlement_pending purchase is skipped at on
   const next = await batchShare(w, ch, "3000000");
   assert.equal(next.outcome?.status, "accepted", "the next voucher builds on the same base without a mismatch");
 });
+
+test("a batch-settlement share skipped before its checks still carries the channel snapshot, without the voucher", async () => {
+  const w = await world();
+  w.chain.deposit(w.config, 1_000_000n);
+  const ch = S.openClientChannel(NET, w.config);
+  await batchShare(w, ch, "2000000");
+  const accepted = w.req("3000000");
+  const cases: Array<[string, PaymentPayload, SettleResponse]> = [];
+  // A refund payload: not a purchase that can carry a share.
+  let info = await w.share(accepted, { kind: "batch-settlement", channel: ch });
+  cases.push(["purchase-not-supported", w.payload(accepted, info, { type: "refund" }), w.ok()]);
+  for (const [reason, pp, sr] of cases) {
+    const r = await w.log.onSettled(pp, accepted, sr);
+    assert.deepEqual([r.outcome?.status, r.outcome?.reason], ["skipped", reason]);
+    assert.equal(r.outcome?.channel?.channelId, ch.channelId.toLowerCase(), `${reason}: snapshot`);
+    assert.equal(r.outcome?.channel?.chargedCumulativeAmount, "2000", `${reason}: nothing charged`);
+    assert.equal(r.outcome?.channel?.signature, undefined, `${reason}: no voucher`);
+    assert.deepEqual(S.validateOutcome(r.outcome as S.SolidarityOutcome), { valid: true });
+    assert.ok(S.applyOutcomeToChannel(ch, r.outcome), `${reason}: the client keeps its state`);
+  }
+  // A purchase settle that failed.
+  info = await w.share(accepted, { kind: "batch-settlement", channel: ch });
+  const r = await w.log.onSettled(w.payload(accepted, info), accepted, { success: false, errorReason: "insufficient_funds", transaction: "", network: NET });
+  assert.deepEqual([r.outcome?.status, r.outcome?.reason], ["skipped", "purchase-not-final"]);
+  assert.equal(r.outcome?.channel?.chargedCumulativeAmount, "2000");
+  assert.ok(S.applyOutcomeToChannel(ch, r.outcome));
+  assert.equal(ch.chargedCumulativeAmount, "2000");
+  const next = await batchShare(w, ch, "3000000");
+  assert.equal(next.outcome?.status, "accepted", "the next voucher builds on the same base");
+});
+
+test("a share skipped for a reason the client can fix may be retried with the same id; one the log accepted may not", async () => {
+  const w = await world();
+  const accepted = w.req("48000000");
+  const info = await w.share(accepted);
+  const wrong = await w.log.onSettled(w.payload(accepted, { ...structuredClone(info), log: "https://elsewhere.example/solidarity" }), accepted, w.ok());
+  assert.deepEqual([wrong.outcome?.status, wrong.outcome?.reason], ["skipped", "wrong-log"]);
+  const retry = await w.log.onSettled(w.payload(accepted, structuredClone(info)), accepted, w.ok());
+  assert.equal(retry.outcome?.status, "accepted", "a skipped id is not held, so it is not a duplicate");
+  await retry.followUp;
+  const again = await w.log.onSettled(w.payload(accepted, structuredClone(info)), accepted, w.ok());
+  assert.deepEqual([again.outcome?.status, again.outcome?.reason], ["skipped", "duplicate"]);
+});

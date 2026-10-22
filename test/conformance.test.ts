@@ -19,7 +19,7 @@ const python = spawnSync("python3", ["--version"]).status === 0;
 const verifyPy = siteFile("verify.py");
 const run = (...args: string[]) => spawnSync("python3", ["-I", verifyPy as string, ...args], { cwd: join(ROOT, "conformance"), encoding: "utf8" });
 
-test("the site's verify.py accepts every generated batch, the chain and the receipts", { skip: (!python || !verifyPy) && "python3 or verify.py not found" }, () => {
+test("the site's verify.py accepts every generated batch, the chain and the receipts", { skip: (!python || !verifyPy) && "python3 or verify.py not found: set SOLIDARITY_SITE_DIR (README, \"Run it\")" }, () => {
   for (const p of ["2026-10", "2026-11", "2026-12"]) {
     const r = run("--lines", `files/${p}.lines`, "--statement", `files/${p}.statement.json`, "--settlements", `files/${p}.settlements`);
     assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -42,7 +42,7 @@ test("the site's verify.py accepts every generated batch, the chain and the rece
   assert.notEqual(bad.status, 0);
 });
 
-test("the site's merkle.js verifies the generated receipts and reproduces the statements", { skip: !siteFile("merkle.js") && "site merkle.js not found" }, async () => {
+test("the site's merkle.js verifies the generated receipts and reproduces the statements", { skip: !siteFile("merkle.js") && "site merkle.js not found: set SOLIDARITY_SITE_DIR (README, \"Run it\")" }, async () => {
   const site = await import(pathToFileURL(siteFile("merkle.js") as string).href);
   const st = conformance("statements.json");
   const raw = Buffer.from(st.keys.log.publicKeyHex, "hex");

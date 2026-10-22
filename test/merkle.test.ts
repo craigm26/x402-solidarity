@@ -29,7 +29,7 @@ const CT_PATHS: Array<[number, number, string[]]> = [
   [1, 5, ["6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d", "5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e", "bc1a0643b12e4d2d7c77918f44e0f4f79a838b6cf9ec5b5c283e1f4d88599e6b"]],
 ];
 
-test("RFC 6962 reference roots for every prefix of the 8 test leaves", () => {
+test("Certificate Transparency reference roots (RFC 6962 hashing) for every prefix of the 8 test leaves", () => {
   for (let n = 1; n <= 8; n++) assert.equal(merkleRoot(leaves.slice(0, n)), VERIFY_PY_ROOTS[n - 1], `n=${n}`);
   assert.deepEqual(m.rootsByPrefixSize, VERIFY_PY_ROOTS);
 });
@@ -70,7 +70,7 @@ test("an inner node cannot pass as a leaf (second preimage)", () => {
   assert.notEqual(merkleRoot([new Uint8Array(fake)]), t.rootHex);
 });
 
-test("agrees with the site's merkle.js on the spec lines and the conformance batch", { skip: !siteFile("merkle.js") && "site merkle.js not found" }, async () => {
+test("agrees with the site's merkle.js on the spec lines and the conformance batch", { skip: !siteFile("merkle.js") && "site merkle.js not found: set SOLIDARITY_SITE_DIR (README, \"Run it\")" }, async () => {
   const site = await import(pathToFileURL(siteFile("merkle.js") as string).href);
   const spec = conformance("spec-draft2-vectors.json");
   const ledger = conformance("ledger.json");

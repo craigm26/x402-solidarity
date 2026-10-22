@@ -299,7 +299,7 @@ test("the outcome schema enforces the table: reason only when skipped, period an
 // The spec is three documents: solidarity.md (the x402 extension, with the wire examples),
 // attestation.md (the receipt attestation contract, with the log descriptor) and processor-mode.md.
 const SPEC_DOCS = ["spec/solidarity.md", "spec/attestation.md", "spec/processor-mode.md"];
-test("the schemas here are the spec's inline schemas", { skip: !SPEC_DOCS.every((f) => siteFile(f)) && "site spec not found" }, () => {
+test("the schemas here are the spec's inline schemas", { skip: !SPEC_DOCS.every((f) => siteFile(f)) && "site spec not found: set SOLIDARITY_SITE_DIR (README, \"Run it\")" }, () => {
   const md = SPEC_DOCS.map((f) => readFileSync(siteFile(f) as string, "utf8")).join("\n");
   const example = (name: string) => JSON.parse((new RegExp(`<!-- example:${name} -->\\n\`\`\`json\\n([\\s\\S]*?)\\n\`\`\``).exec(md) as RegExpExecArray)[1]);
   assert.deepEqual(example("payment-required").extensions.solidarity.schema, S.solidaritySchema);

@@ -1,9 +1,12 @@
 /**
  * Network and contract constants used by the reference implementation.
  *
- * Every value here is copied from the x402 repository (coinbase/x402), commit
- * 0e6e8c55d86b4f14234fb6e49a4052074fb93e57, and cross-checked against a second
- * place in the same repository where one exists. Nothing here names a fund:
+ * Every value here is copied from coinbase/x402 at commit
+ * 0e6e8c55d86b4f14234fb6e49a4052074fb93e57 (coinbase/x402 is now a development
+ * fork of x402-foundation/x402, and that commit is not on x402-foundation main),
+ * and cross-checked against a second place in the same repository where one
+ * exists. The same values, at the same paths, are on x402-foundation/x402 main
+ * as of 2026-10-22. Nothing here names a fund:
  * no fund exists, and the fund address used in examples is a placeholder.
  */
 
@@ -14,12 +17,12 @@ export const BASE_SEPOLIA = "eip155:84532";
  * USDC on Base Sepolia, with the EIP-712 domain its EIP-3009
  * `transferWithAuthorization` signatures use.
  *
- * Sources in coinbase/x402 at the commit above:
+ * Sources in coinbase/x402 at the commit above (and on x402-foundation/x402 main):
  * - typescript/packages/mechanisms/evm/src/defaultAssets.ts, DEFAULT_ASSETS["eip155:84532"]:
  *   asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e, name "USDC", version "2", decimals 6.
  * - typescript/packages/legacy/x402/src/types/shared/evm/config.ts, config["84532"]:
  *   usdcAddress 0x036CbD53842c5426634e7929541eC2318f3dCF7e, usdcName "USDC".
- * - specs/extensions/solidarity.md and the x402 v2 examples use extra {name: "USDC", version: "2"}.
+ * - The solidarity spec's examples and the x402 v2 examples use extra {name: "USDC", version: "2"}.
  *
  * Note that the domain name differs between networks: Base mainnet USDC signs
  * as "USD Coin". Always take name and version from the payment requirements'

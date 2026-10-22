@@ -30,7 +30,7 @@ function ctx(policy: OwnerPolicy = POLICY) {
   return { policy, counter: new S.CapCounter(policy), signer, descriptor: DESCRIPTOR, now: NOW };
 }
 
-test("USDC on Base Sepolia: address and EIP-712 domain as the x402 repo lists them", { skip: !x402File("typescript/packages/mechanisms/evm/src/defaultAssets.ts") && "x402 repo not found" }, () => {
+test("USDC on Base Sepolia: address and EIP-712 domain as the x402 repo lists them", { skip: !x402File("typescript/packages/mechanisms/evm/src/defaultAssets.ts") && "x402 repository not found: set X402_DIR (README, \"Run it\")" }, () => {
   const src = readFileSync(x402File("typescript/packages/mechanisms/evm/src/defaultAssets.ts") as string, "utf8");
   const block = src.slice(src.indexOf('"eip155:84532"'), src.indexOf("// Base Sepolia USDC"));
   assert.match(block, new RegExp(`asset: "${S.USDC_BASE_SEPOLIA.address}"`));

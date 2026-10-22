@@ -200,7 +200,7 @@ export class SolidarityLog {
     } catch {
       // A share never blocks or changes the purchase: anything unexpected about it is a
       // malformed share, and the purchase's response goes back with its core fields intact.
-      outcome = { ...base, status: "skipped", reason: "bad-payment" };
+      outcome = this.withChannel({ ...base, status: "skipped", reason: "bad-payment" }, info);
     }
 
     const out = withOutcome(settleResponse, outcome);
@@ -224,17 +224,14 @@ export class SolidarityLog {
 
     const basis = purchaseBasis(paymentPayload, requirements, settleResponse);
     if (!basis.ok) {
-      // Spec choice: refund payloads, server-written settles and escrow flows never trigger a
-      // share; the spec names no reason for them, so they get purchase-not-supported.
-      outcome = { ...base, status: "skipped", reason: "purchase-not-supported" };
+      // "Purchases that can carry a share": a share on a refund payload, an escrow flow, a
+      // batch-settlement purchase or any other scheme "is skipped with purchase-not-supported".
+      outcome = this.withChannel({ ...base, status: "skipped", reason: "purchase-not-supported" }, info);
     } else if (!settleResponse.success && settleResponse.errorReason === "settlement_pending" && settleResponse.transaction && shareScheme(info) !== "exact") {
       // Only exact shares are held for a pending purchase. A held voucher would be signed on the
       // same chargedCumulativeAmount as the client's next one, so it is skipped at once and
       // nothing is charged; the client leaves its channel state as it was.
-      outcome = { ...base, status: "skipped", reason: "purchase-not-final" };
-      const cid = voucherChannelId(info);
-      const snap = cid ? this.snapshot(cid) : undefined;
-      if (snap) outcome.channel = snap;
+      outcome = this.withChannel({ ...base, status: "skipped", reason: "purchase-not-final" }, info);
     } else if (!settleResponse.success && settleResponse.errorReason === "settlement_pending" && settleResponse.transaction) {
       // Spec choice: the share is only held here. Its checks run when the purchase confirms
       // (resolvePending), and its period is the month it is accepted then.
@@ -247,7 +244,7 @@ export class SolidarityLog {
         outcome = { ...base, status: "skipped", reason: isValidShareId(info.id) ? "duplicate" : "bad-payment" };
       }
     } else if (!settleResponse.success) {
-      outcome = { ...base, status: "skipped", reason: "purchase-not-final" };
+      outcome = this.withChannel({ ...base, status: "skipped", reason: "purchase-not-final" }, info);
     } else {
       const r = await this.process(info, paymentPayload, requirements, basis.basis);
       outcome = r.outcome;
@@ -285,6 +282,24 @@ export class SolidarityLog {
    */
   onPurchaseRefund(_refund: { transaction?: string; amount?: string }): { adjusted: false; rule: "keep" } {
     return { adjusted: false, rule: "keep" };
+  }
+
+  /**
+   * Adds the channel snapshot to a skip decided before the share's checks ran:
+   * "Every solidarity response for a `batch-settlement` share, skipped or not,
+   * carries `channel` whenever the log can identify the channel"
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Optional share kind: `batch-settlement`").
+   * The voucher is never returned here: only a cumulative-mismatch carries it.
+   */
+  private withChannel(outcome: SolidarityOutcome, info: SolidarityInfo): SolidarityOutcome {
+    try {
+      const cid = voucherChannelId(info);
+      const snap = cid ? this.snapshot(cid) : undefined;
+      if (snap) outcome.channel = snap;
+    } catch {
+      // The snapshot is best effort; the skip stands without it.
+    }
+    return outcome;
   }
 
   private baseOutcome(info: SolidarityInfo): Pick<SolidarityOutcome, "id" | "log"> {
@@ -411,9 +426,8 @@ export class SolidarityLog {
     if (!isValidShareId(info.id)) throw new Skip("bad-payment", "id");
     if (validateSchema(solidaritySchema, info).length > 0) throw new Skip("bad-payment", "schema");
 
-    // `id` has not been seen in this log.
-    // Spec choice: only ids the log holds (accepted, pending, or being checked) count as seen,
-    // so a share skipped for a reason the client can fix may be retried with the same id.
+    // "`id` is not that of a share this log has accepted, holds as `pending` or is processing":
+    // a share skipped for a reason the client can fix may be retried with the same id.
     if (this.shares.has(info.id) || this.reserved.has(info.id)) throw new Skip("duplicate");
     reserve(info.id);
     this.reserved.add(info.id);

@@ -367,9 +367,12 @@ export function readOutcome(settleResponse: { extensions?: Record<string, unknow
 
 /**
  * The AP2-style mandate constraint that carries a processor-mode policy
- * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2 and ACP notes", informative): the policy's own fields, with `cap` in
- * the policy's units (minor units of an ISO 4217 code on card and bank
- * rails), plus `holder`, the one party that applies the share.
+ * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2 and ACP notes", informative):
+ * `type`, `holder` (the one party that applies the share) and the policy's
+ * `rate`, `cap`, `fund`, `logs` and `refunds`, with `cap` in the policy's units
+ * (minor units of an ISO 4217 code on card and bank rails). The mandate's own
+ * consent time stands in for the policy's `since`, so neither it nor `version`
+ * is carried.
  */
 export function processorConstraint(policy: OwnerPolicy, opts: { holder: string; logs?: string[] }) {
   assertPolicy(policy, "processor");
