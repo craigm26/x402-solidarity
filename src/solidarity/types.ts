@@ -1,8 +1,13 @@
 /**
  * Type definitions and constants for the solidarity extension, draft 2.
  *
- * Source of truth: spec/solidarity.md, draft 2 (2026-10-22). Section names in
- * comments ("Owner policy", "Facilitator behaviour" and so on) refer to it.
+ * Source of truth: the draft 2 spec (2026-10-22), three documents:
+ * - https://craigmerry.com/solidarity-levy/spec/solidarity.md (the x402 extension),
+ * - https://craigmerry.com/solidarity-levy/spec/attestation.md (the receipt attestation contract, normative for logs),
+ * - https://craigmerry.com/solidarity-levy/spec/processor-mode.md (informative).
+ * A section name quoted alone in a comment ("Owner policy", "Facilitator
+ * behaviour" and so on) is a heading of solidarity.md; sections of the other
+ * two documents are cited with the document's URL.
  */
 
 /** Extension key in `extensions`. */
@@ -11,7 +16,7 @@ export const SOLIDARITY = "solidarity";
 /** Wire and statement version. */
 export const SOLIDARITY_VERSION = 2;
 
-/** Line prefix ("Receipt attestation", "Lines"). */
+/** Line prefix (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Lines"). */
 export const LINE_PREFIX = "solidarity/2";
 
 /** `rate` on the wire: "0.000001" to "0.01", no trailing zeros. */
@@ -140,7 +145,7 @@ export interface SolidarityOutcome {
   channel?: ChannelSnapshot;
 }
 
-/** One `accepts` entry of a log descriptor ("Publication"). */
+/** One `accepts` entry of a log descriptor (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Publication"). */
 export interface DescriptorAccept {
   network: string;
   asset: string;
@@ -159,7 +164,7 @@ export interface PublicJwk {
 }
 
 /**
- * One statement key a log has used ("Signatures and keys"): its public key,
+ * One statement key a log has used (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Signatures and keys"): its public key,
  * and the first and last period it signed (`until` is null for the current
  * key). DID documents and DNS show only current state, so a retired key's
  * public key is known only from here.
@@ -209,7 +214,7 @@ export interface JwsEnvelope {
   signature: string;
 }
 
-/** Statement payload ("Statements"). */
+/** Statement payload (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements"). */
 export interface StatementPayload {
   version: 2;
   log: string;
@@ -235,7 +240,7 @@ export interface PublishedStatement {
   cosignatures: JwsEnvelope[];
 }
 
-/** A receipt ("Receipts"). */
+/** A receipt (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Receipts"). */
 export interface Receipt {
   version: 2;
   line: string;

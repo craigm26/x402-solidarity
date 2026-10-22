@@ -1,6 +1,7 @@
 /**
  * JSON Schema definitions for the solidarity extension (draft 2020-12), copied
- * from spec/solidarity.md ("PaymentRequired" and "SettleResponse"), plus a
+ * from https://craigmerry.com/solidarity-levy/spec/solidarity.md ("`PaymentRequired` and
+ * `PaymentPayload`" and "`SettleResponse`"), plus a
  * small validator for the keywords these schemas use. The x402 SDK uses Ajv;
  * this repository depends only on viem, so it carries its own validator.
  */

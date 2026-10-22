@@ -9,8 +9,9 @@
  * - Audit paths are PATH(m, D[n]) from section 2.1.1, and verification follows
  *   RFC 9162 section 2.1.3.2.
  *
- * Consistency proofs are not implemented: the spec ("Consistency between
- * months") says batches are closed and never extended, so they are not needed.
+ * Consistency proofs are not implemented: the spec (https://craigmerry.com/solidarity-levy/spec/attestation.md,
+ * "Consistency between months") says batches are closed and never extended,
+ * so they are not needed.
  */
 
 import { createHash } from "node:crypto";

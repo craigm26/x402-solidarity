@@ -10,7 +10,7 @@ import { AMOUNT_PATTERN, CAIP10_PATTERN, PERIOD_PATTERN, RATE_PATTERN, SHARE_ID_
 /**
  * A new share id: 16 bytes (128 bits) from the CSPRNG, base64url without
  * padding, which is exactly 22 characters of [A-Za-z0-9_-]. Never derived
- * from anything else ("PaymentPayload", `id`).
+ * from anything else ("`PaymentRequired` and `PaymentPayload`", `id`).
  */
 export function generateShareId(): string {
   return b64url(randomBytes(16));
@@ -99,7 +99,7 @@ export function evmChainId(network: string): number {
 const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/;
 export const isEvmAddress = (s: unknown): s is string => typeof s === "string" && EVM_ADDR.test(s);
 
-/** EVM hex addresses lowercase (bare or in an eip155 CAIP-10 account); anything else unchanged ("Lines"). */
+/** EVM hex addresses lowercase (bare or in an eip155 CAIP-10 account); anything else unchanged (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Lines"). */
 export function canonicalAccount(s: string): string {
   const m = /^(eip155:[0-9]{1,32}:)(0x[0-9a-fA-F]{40})$/.exec(s);
   if (m) return m[1] + m[2].toLowerCase();

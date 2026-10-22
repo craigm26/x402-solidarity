@@ -29,7 +29,8 @@ export function declareSolidarityExtension(logs: LogEntry[]): SolidarityExtensio
 /**
  * Shape-compatible with @x402/core's ResourceServerExtension. Static: the
  * declaration carries everything. A hook that fills `logs` from a
- * facilitator's /supported is future work in the spec.
+ * facilitator's /supported is an open question in the spec (https://craigmerry.com/solidarity-levy/spec/solidarity.md,
+ * "Open questions").
  */
 export const solidarityResourceServerExtension = { key: SOLIDARITY } as const;
 

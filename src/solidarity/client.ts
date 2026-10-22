@@ -3,7 +3,7 @@
  *
  * Separate mode: the client holds the owner's policy, signs its own payment
  * for the share and carries it in `extensions.solidarity` next to the
- * purchase payment ("x402 binding (separate mode)").
+ * purchase payment ("Advertisement", "`PaymentRequired` and `PaymentPayload`").
  *
  * Processor mode puts nothing on the x402 wire. The only client-side pieces
  * are the mandate constraint that carries the policy to a processor and the
@@ -98,7 +98,8 @@ const isUint = (v: unknown): v is string => typeof v === "string" && /^(0|[1-9][
 
 /**
  * Apply a solidarity outcome to the channel and free it for the next share
- * ("Share kinds", batch-settlement; the binding's client verification rules).
+ * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Optional share kind: `batch-settlement`";
+ * the binding's client verification rules).
  * The snapshot is untrusted: when the share was accepted with a reported
  * amount at most what it signed, the new state is the previous one plus the
  * amount this share signed (the log advances chargedCumulativeAmount by the
@@ -366,7 +367,7 @@ export function readOutcome(settleResponse: { extensions?: Record<string, unknow
 
 /**
  * The AP2-style mandate constraint that carries a processor-mode policy
- * ("AP2 and ACP notes", informative): the policy's own fields, with `cap` in
+ * (https://craigmerry.com/solidarity-levy/spec/processor-mode.md, "AP2 and ACP notes", informative): the policy's own fields, with `cap` in
  * the policy's units (minor units of an ISO 4217 code on card and bank
  * rails), plus `holder`, the one party that applies the share.
  */

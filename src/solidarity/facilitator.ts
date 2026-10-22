@@ -1,6 +1,7 @@
 /**
- * Facilitator side: a solidarity log ("Facilitator behaviour", "Receipt
- * attestation", "Publication", "Refunds").
+ * Facilitator side: a solidarity log ("Facilitator behaviour", "Share kinds",
+ * "Refunds"; and https://craigmerry.com/solidarity-levy/spec/attestation.md, "Publication" and
+ * "Optional share kind: `batch-settlement`").
  *
  * - /verify is untouched: `onVerify` returns the purchase's VerifyResponse
  *   unchanged and has no side effects.
@@ -336,7 +337,7 @@ export class SolidarityLog {
       }
     };
 
-    // Serialize processing per channel ("The log MUST serialize processing per channel").
+    // Serialize processing per channel (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Optional share kind: `batch-settlement`": "The log MUST serialize processing per channel").
     if (channelId) return this.withChannelLock(channelId.toLowerCase(), run);
     return run();
   }

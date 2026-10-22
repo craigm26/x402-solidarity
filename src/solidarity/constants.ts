@@ -52,8 +52,9 @@ export const transferWithAuthorizationTypes = {
 /**
  * batch-settlement (EVM binding) constants, from
  * typescript/packages/mechanisms/evm/src/batch-settlement/constants.ts.
- * The spec says using this binding with a fund as receiver needs review by the
- * binding's maintainers; this code follows the binding as written.
+ * The spec (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Optional share kind:
+ * `batch-settlement`") says using this binding with a fund as receiver needs
+ * review by the binding's maintainers; this code follows the binding as written.
  */
 export const BATCH_SETTLEMENT_ADDRESS = "0x4020074e9dF2ce1deE5A9C1b5c3f541D02a10003";
 export const BATCH_SETTLEMENT_DOMAIN = { name: "x402 Batch Settlement", version: "1" } as const;

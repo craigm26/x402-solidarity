@@ -2,7 +2,7 @@
  * A log's book: settlement references per period, closed batches, signed and
  * chained statements, cosignatures and the publication endpoints. Shared by
  * the facilitator's log (separate mode) and a processor's log (processor
- * mode), which publish exactly the same things ("Receipt attestation").
+ * mode), which publish exactly the same things (https://craigmerry.com/solidarity-levy/spec/attestation.md).
  */
 
 import type { Batch, SigningKey } from "./ledger.ts";

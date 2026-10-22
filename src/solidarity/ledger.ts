@@ -1,7 +1,7 @@
 /**
- * Receipt attestation ("Receipt attestation"): lines, batches, settlement
- * references, statements, JWS signatures, witnesses and receipts. The same in
- * both modes.
+ * Receipt attestation (https://craigmerry.com/solidarity-levy/spec/attestation.md): lines, batches,
+ * settlement references, statements, JWS signatures, witnesses and receipts.
+ * The same in both modes.
  *
  * Signatures use node:crypto: Ed25519 ("EdDSA") and P-256 ("ES256", with the
  * raw r||s encoding JWS requires).
@@ -308,7 +308,7 @@ const TOTALS_FIELDS = ["amount", "asset", "fund", "lines"];
 const isCount = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 
 /**
- * Problems with a statement payload's fields ("Statements"): exactly the
+ * Problems with a statement payload's fields (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements"): exactly the
  * listed fields, each of its type and form, and totals rows in the form
  * lines use, strictly sorted, adding up to `size`. [] when it is fine.
  */
@@ -420,7 +420,7 @@ export function listedKey(descriptor: Pick<LogDescriptor, "keys">, kid: string, 
   return descriptor.keys.find((k) => k.kid === kid && k.from <= period && (k.until === null || period <= k.until));
 }
 
-/** A log's first period: the `from` of the earliest key in its descriptor ("Consistency between months"). */
+/** A log's first period: the `from` of the earliest key in its descriptor (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund", "Publication"). */
 export function firstPeriod(descriptor: Pick<LogDescriptor, "keys">): string | undefined {
   return descriptor.keys.map((k) => k.from).sort()[0];
 }
@@ -454,7 +454,7 @@ export interface StatementCheck {
  * key the descriptor lists for that period, when a descriptor is given) and
  * every cosignature the verifier requires (by kid).
  *
- * Keys ("Signatures and keys"): did:web and DNS show only current state, so
+ * Keys (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Signatures and keys"): did:web and DNS show only current state, so
  * they can authorize only the current key. Without a descriptor, the key must
  * be authorized that way. A key the descriptor lists as current must be too.
  * A key the descriptor lists as retired is taken from the descriptor's `jwk`,
@@ -580,7 +580,7 @@ export function verifyReceipt(receipt: Receipt, opts: VerifyOptions): ReceiptChe
 // ---- witnesses ---------------------------------------------------------------------------
 
 /**
- * A witness ("Witnesses"). Before cosigning it verifies the log's signature,
+ * A witness (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund"). Before cosigning it verifies the log's signature,
  * checks that `previous` equals the hash of the last payload it cosigned for
  * this log (or walks the chain back to it through `history`), and never
  * cosigns two different payloads for one (log, period). It may also recompute

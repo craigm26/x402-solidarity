@@ -1,5 +1,6 @@
 /**
- * Processor mode ("Processor mode", "Refunds"). Nothing here goes on the x402
+ * Processor mode (https://craigmerry.com/solidarity-levy/spec/processor-mode.md,
+ * "Processor mode", "The processor's log", "Refunds"). Nothing here goes on the x402
  * wire. A buyer-side party that holds the owner's credential applies the
  * policy: one line per finalized purchase, collection in aggregate once per
  * period (amounts below `minCollection` carry forward), one payout per fund
@@ -7,8 +8,8 @@
  *
  * This is an arithmetic and bookkeeping model, not a payment processor: it
  * charges no one and pays no one. Running processor mode for real involves
- * money transmission, charitable-solicitation and card-network rules the spec
- * lists as open questions.
+ * money transmission, charitable-solicitation and card-network rules that
+ * processor-mode.md lists as open questions.
  */
 
 import { LogBook } from "./book.ts";
