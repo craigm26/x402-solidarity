@@ -37,6 +37,7 @@ export class SimulatedChain implements LogChain {
   private readonly balances = new Map<string, bigint>(); // token|holder
   private readonly usedNonces = new Set<string>(); // token|from|nonce
   private readonly nonceTx = new Map<string, string>(); // token|from|nonce -> the transfer that used it
+  private readonly canceled = new Set<string>(); // token|from|nonce, cancelled before use
   private readonly transfers = new Map<string, { token: Addr; from: Addr; to: Addr; value: bigint }>();
   private readonly channels = new Map<string, Channel>();
   private readonly claims = new Map<string, { channelId: string; increase: bigint }>(); // tx|channelId
@@ -103,14 +104,27 @@ export class SimulatedChain implements LogChain {
     return { ok: true, transaction: tx };
   }
 
-  /** EIP-3009 cancelAuthorization (the signature is not modelled here). */
+  /** EIP-3009 cancelAuthorization (the signature is not modelled here). Like USDC, it refuses a used authorization. */
   cancelAuthorization(token: Addr, from: Addr, nonce: string): void {
-    this.usedNonces.add(`${lc(token)}|${lc(from)}|${lc(nonce)}`);
+    const k = `${lc(token)}|${lc(from)}|${lc(nonce)}`;
+    if (this.usedNonces.has(k)) throw new Error("authorization is used or canceled");
+    this.usedNonces.add(k);
+    this.canceled.add(k);
   }
 
   // LogChain
   submitExact(accepted: PaymentRequirements, payload: ExactEip3009Payload) {
     return this.transferWithAuthorization(accepted, payload);
+  }
+
+  /** LogChain.authorizationUsed: EIP-3009 authorizationState, true once used or cancelled. */
+  async authorizationUsed(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean> {
+    return this.authorizationState(accepted.asset, payload.authorization.from, payload.authorization.nonce);
+  }
+
+  /** LogChain.authorizationCanceled: the chain shows this authorization cancelled (USDC's AuthorizationCanceled event). */
+  async authorizationCanceled(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean> {
+    return this.canceled.has(`${lc(accepted.asset)}|${lc(payload.authorization.from)}|${lc(payload.authorization.nonce)}`);
   }
 
   /** The transfer that executed this authorization, whoever submitted it (a cancelled one has none). */

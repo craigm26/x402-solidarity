@@ -1,7 +1,7 @@
 {
   "name": "x402-solidarity",
   "version": "0.2.0",
-  "description": "Reference implementation of the draft 2 solidarity extension for x402: share signing, facilitator checks, and a signed, witnessed RFC 6962 ledger. Simulated; no fund exists.",
+  "description": "Reference implementation of the draft 3 solidarity extension for x402: share signing, facilitator checks, and a signed, witnessed RFC 6962 ledger. Simulated; no fund exists.",
   "license": "Apache-2.0",
   "repository": "https://github.com/craigm26/x402-solidarity",
   "private": true,

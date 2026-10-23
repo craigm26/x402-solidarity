@@ -9,7 +9,7 @@ import { checkEnv } from "../examples/live-base-sepolia/env.ts";
 import { FacilitatorLogChain } from "../examples/live-base-sepolia/facilitatorChain.ts";
 import type { Fetch } from "../examples/live-base-sepolia/facilitatorChain.ts";
 import { mappingSlot, simulateExactTransfer } from "../examples/live-base-sepolia/simulate.ts";
-import { findExactTransferOnChain } from "../examples/live-base-sepolia/findTransfer.ts";
+import { authorizationCanceledOnChain, authorizationUsedOnChain, findExactTransferOnChain, withExactLookup } from "../examples/live-base-sepolia/findTransfer.ts";
 import type { LookupClient } from "../examples/live-base-sepolia/findTransfer.ts";
 import { keccak256, toHex } from "viem";
 import type { CallClient } from "../examples/live-base-sepolia/simulate.ts";
@@ -143,6 +143,38 @@ test("findExactTransfer: an unused nonce asks nothing more; a used one is matche
   assert.equal(await findExactTransferOnChain(fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], status: "reverted", receiptLogs: [transfer(account.address, FUND, 1000n, 5)] }), accepted, payload), undefined, "a reverted transaction moved nothing");
   assert.equal(await findExactTransferOnChain(fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], receiptLogs: [transfer("0x00000000000000000000000000000000000000bb", FUND, 1000n, 5)] }), accepted, payload), undefined, "a Transfer from someone else is not this authorization's");
   assert.equal(await findExactTransferOnChain(fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], receiptLogs: [transfer(account.address, FUND, 1000n, 2)] }), accepted, payload), undefined, "only the Transfer right after AuthorizationUsed counts");
+});
+
+test("draft 3 reads for the log: authorizationState, and AuthorizationCanceled for an authorization that reads used", async () => {
+  const account = privateKeyToAccount(generatePrivateKey());
+  const accepted = requirements(FUND, "1000");
+  const payload = await S.signEip3009(account, accepted, window());
+  const CANCELED = keccak256(toHex("AuthorizationCanceled(address,bytes32)"));
+  const calls: string[] = [];
+  const fake = (o: { used: unknown; canceled?: boolean }): LookupClient => ({
+    readContract: async () => (calls.push("authorizationState"), o.used),
+    getBlockNumber: async () => 1000n,
+    request: async (a) => {
+      const topics = (a.params[0] as { topics: string[] }).topics;
+      calls.push(topics[0] === CANCELED ? "getLogs canceled" : "getLogs other");
+      assert.equal(topics[2], payload.authorization.nonce.toLowerCase());
+      return (o.canceled && topics[0] === CANCELED ? [{ transactionHash: `0x${"ef".repeat(32)}`, logIndex: "0x1" }] : []) as never;
+    },
+    getTransactionReceipt: async () => ({ status: "success", logs: [] }),
+  });
+  assert.equal(await authorizationUsedOnChain(fake({ used: false }), accepted, payload), false);
+  assert.equal(await authorizationUsedOnChain(fake({ used: true }), accepted, payload), true);
+  await assert.rejects(() => authorizationUsedOnChain(fake({ used: "0x01" }), accepted, payload), /did not return a bool/);
+  calls.length = 0;
+  assert.equal(await authorizationCanceledOnChain(fake({ used: false, canceled: true }), accepted, payload), false, "unused: never cancelled");
+  assert.deepEqual(calls, ["authorizationState"], "an unused authorization needs no log search");
+  assert.equal(await authorizationCanceledOnChain(fake({ used: true, canceled: true }), accepted, payload), true);
+  assert.equal(await authorizationCanceledOnChain(fake({ used: true }), accepted, payload, { lookbackBlocks: 400n }), false, "used by a transfer, or cancelled outside the window");
+  // withExactLookup wires all three into the log's chain.
+  const chain = withExactLookup({ submitExact: async () => ({ ok: false as const, error: "x" }), channelState: () => undefined, claim: async () => ({ ok: false as const, error: "x" }) } as S.LogChain, fake({ used: true, canceled: true }));
+  assert.equal(await chain.authorizationUsed?.(accepted, payload), true);
+  assert.equal(await chain.authorizationCanceled?.(accepted, payload), true);
+  assert.equal(typeof chain.findExactTransfer, "function");
 });
 
 test("findExactTransfer against Base Sepolia: finds the 2026-10-22 share, and nothing for an unused nonce", { skip: NEEDS_RPC }, async () => {

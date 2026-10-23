@@ -15,6 +15,8 @@ const witnessKey = S.ed25519FromSeed(V.keys.witness.privateKeyHex, V.keys.witnes
 const fundKey = S.ed25519FromSeed("c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7", ST.keys.fund.kid);
 const resolveKey = S.staticResolver({ [logKey.kid]: logKey.publicKey, [witnessKey.kid]: witnessKey.publicKey, [fundKey.kid]: fundKey.publicKey });
 const pubs: PublishedStatement[] = ["2026-10", "2026-11", "2026-12"].map((p) => JSON.parse(conformanceText(`files/${p}.statement.json`)));
+/** A statement as the log first publishes it, before any cosignature (the conformance files carry this witness's own). */
+const bare = (p: PublishedStatement): PublishedStatement => ({ statement: p.statement, cosignatures: [] });
 
 test("RFC 8032 section 7.1 test keys: public keys derive from the seeds", () => {
   assert.equal(S.ed25519PublicKeyHex(logKey.publicKey), V.keys.log.publicKeyHex);
@@ -102,18 +104,19 @@ test("a statement key must be listed in the descriptor for the period", () => {
 test("witness: verifies, chains, walks history, and never cosigns two payloads for one period", () => {
   const w = new S.Witness(witnessKey);
   const files = (p: string) => ({ lines: conformanceText(`files/${p}.lines`), settlements: conformanceText(`files/${p}.settlements`) });
-  const c10 = w.cosign(pubs[0], { resolveKey, descriptor: ST.descriptor, files: files("2026-10") });
+  const c10 = w.cosign(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor, files: files("2026-10") });
   assert.equal(c10.signature, V.statements[0].published.cosignatures[0].signature);
   assert.deepEqual(w.cosign(pubs[0], { resolveKey }), c10, "same payload again: same cosignature");
   // Skipping 2026-11 without the history fails; with it, it passes.
-  assert.throws(() => w.cosign(pubs[2], { resolveKey }), /chain/);
-  w.cosign(pubs[2], { resolveKey, history: [pubs[1]], files: files("2026-12") });
+  assert.throws(() => w.cosign(bare(pubs[2]), { resolveKey }), /chain/);
+  w.cosign(bare(pubs[2]), { resolveKey, history: [bare(pubs[1])], files: files("2026-12") });
   // A second, different payload for 2026-12 is refused.
   const forked: StatementPayload = { ...S.decodeStatement(pubs[2].statement).payload, issuedAt: 1799107201 };
   assert.throws(() => w.cosign(S.signStatement(forked, logKey), { resolveKey }), /another payload/);
-  // A statement whose files do not reproduce it is refused by a fresh witness that checks files.
+  // A statement whose files do not reproduce it is refused by a fresh witness that checks files
+  // (with no record for the log, it walks the history back to the log's first statement).
   const w2 = new S.Witness(witnessKey);
-  assert.throws(() => w2.cosign(pubs[2], { resolveKey, files: { lines: "", settlements: files("2026-12").settlements } }), /reproduce/);
+  assert.throws(() => w2.cosign(bare(pubs[2]), { resolveKey, descriptor: ST.descriptor, history: [bare(pubs[0]), bare(pubs[1])], files: { lines: "", settlements: files("2026-12").settlements } }), /reproduce/);
   // A bad log signature is refused.
   const w3 = new S.Witness(witnessKey);
   const other = S.generateSigningKey("EdDSA", logKey.kid);
@@ -251,7 +254,7 @@ test("lines and batches reject what the spec rules out", () => {
 
 test("witness: a right-period statement whose previous forks the chain is refused, and so is history that does not chain", () => {
   const w = new S.Witness(witnessKey);
-  w.cosign(pubs[0], { resolveKey, descriptor: ST.descriptor });
+  w.cosign(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor });
   const nov = S.decodeStatement(pubs[1].statement).payload;
   const fork = S.signStatement({ ...nov, previous: "00".repeat(32) }, logKey);
   assert.throws(() => w.cosign(fork, { resolveKey }), /previous does not chain/);
@@ -260,13 +263,13 @@ test("witness: a right-period statement whose previous forks the chain is refuse
   const dec = S.decodeStatement(pubs[2].statement).payload;
   const onBad = S.signStatement({ ...dec, previous: S.statementHash(S.decodeStatement(badNov.statement).payload) }, logKey);
   assert.throws(() => w.cosign(onBad, { resolveKey, history: [badNov] }), /history does not chain/);
-  w.cosign(pubs[2], { resolveKey, history: [pubs[1]] });
+  w.cosign(bare(pubs[2]), { resolveKey, history: [bare(pubs[1])] });
 });
 
 test("witness: a log's first statement is for the from period of its earliest key", () => {
   const late = { ...ST.descriptor, keys: [{ ...ST.descriptor.keys[0], from: "2026-09" }] };
-  assert.throws(() => new S.Witness(witnessKey).cosign(pubs[0], { resolveKey, descriptor: late }), /first period is 2026-09/);
-  new S.Witness(witnessKey).cosign(pubs[0], { resolveKey, descriptor: ST.descriptor });
+  assert.throws(() => new S.Witness(witnessKey).cosign(bare(pubs[0]), { resolveKey, descriptor: late }), /first period is 2026-09/);
+  new S.Witness(witnessKey).cosign(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor });
   assert.equal(S.firstPeriod(ST.descriptor), "2026-10");
 });
 

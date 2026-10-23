@@ -10,6 +10,7 @@ import { snapshotSettleResponseCore } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import { resetAssetContractCache } from "@x402/evm";
 import { readOutcome, SolidarityLog } from "../../../src/solidarity/index.ts";
+import type { SolidarityInfo } from "../../../src/solidarity/index.ts";
 import { solidarityFacilitator } from "../src/facilitator.ts";
 import { facilitatorLogChain } from "../src/logChain.ts";
 import { makeWorld, NET, resetTime, setSimulatedTime, useSimulatedTime } from "./harness.ts";
@@ -269,27 +270,37 @@ test("if the log changes a core field, the hook puts it back and drops the entry
   assert.equal(w2.facilitatorErrors.length, 1);
 });
 
-test("a share whose transfer cannot be submitted: purchase settled, share accepted then uncollected", async () => {
-  const w = await makeWorld();
-  // Swap the log for one whose share settler always throws.
-  const log = new SolidarityLog({
-    descriptor: w.descriptor,
-    key: w.logKey,
-    chain: facilitatorLogChain({
-      settle: async () => {
-        throw new Error("rpc down");
-      },
-    }),
-  });
-  const ext = solidarityFacilitator({ log });
-  const { payload, requirements, id } = await signedPurchase(w);
-  const settled = await w.exact.settle(payload, requirements);
-  const r = await ext.process(payload, requirements, settled);
-  assert.equal(r.response.success, true);
-  assert.equal(r.outcome?.status, "accepted");
-  await ext.drain();
-  assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, "uncollected");
-  assert.equal(w.fundBalance(), 0n);
+test("a share whose transfer cannot be submitted: purchase settled, share accepted and queued; uncollected only once the chain shows it unused after validBefore", async () => {
+  for (const readsState of [false, true]) {
+    const w = await makeWorld();
+    // Swap the log for one whose share settler always throws; with readsState, the chain's
+    // authorizationState comes through `fallback`.
+    const log = new SolidarityLog({
+      descriptor: w.descriptor,
+      key: w.logKey,
+      chain: facilitatorLogChain(
+        {
+          settle: async () => {
+            throw new Error("rpc down");
+          },
+        },
+        readsState ? { fallback: { authorizationUsed: (a, p) => w.chain.authorizationUsed(a, p) } } : {},
+      ),
+    });
+    const ext = solidarityFacilitator({ log });
+    const { payload, requirements, id } = await signedPurchase(w);
+    const settled = await w.exact.settle(payload, requirements);
+    const r = await ext.process(payload, requirements, settled);
+    assert.equal(r.response.success, true);
+    assert.equal(r.outcome?.status, "accepted");
+    await ext.drain();
+    assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, "queued", "a failed submit does not show that the transfer never executed");
+    const validBefore = Number(((payload.extensions?.solidarity as { info: SolidarityInfo }).info.payment?.payload as { authorization: { validBefore: string } }).authorization.validBefore);
+    setSimulatedTime((validBefore + 30) * 1000);
+    await log.reconcileExact();
+    assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, readsState ? "uncollected" : "queued");
+    assert.equal(w.fundBalance(), 0n);
+  }
 });
 
 test("process() leaves its inputs alone and returns a new object: the operator's own wrapper gets the outcome and the seller's status without the hook", async () => {
@@ -319,12 +330,15 @@ test("process() leaves its inputs alone and returns a new object: the operator's
   assert.equal(none.outcome, undefined);
 });
 
-test("a share settle that fails with a transaction (a reverted transfer) is uncollected, and the month's files leave it out", async () => {
+test("a share settle that fails with a transaction (a reverted transfer) is uncollected once the chain shows it unused after validBefore, and the month's files leave it out", async () => {
   const w = await makeWorld();
   const log = new SolidarityLog({
     descriptor: w.descriptor,
     key: w.logKey,
-    chain: facilitatorLogChain({ settle: async () => ({ success: false, errorReason: "transaction_failed", transaction: `0x${"ab".repeat(32)}`, network: NET }) }),
+    chain: facilitatorLogChain(
+      { settle: async () => ({ success: false, errorReason: "transaction_failed", transaction: `0x${"ab".repeat(32)}`, network: NET }) },
+      { fallback: { authorizationUsed: (a, p) => w.chain.authorizationUsed(a, p) } },
+    ),
   });
   const ext = solidarityFacilitator({ log });
   const { payload, requirements, id } = await signedPurchase(w);
@@ -332,9 +346,11 @@ test("a share settle that fails with a transaction (a reverted transfer) is unco
   const r = await ext.process(payload, requirements, settled);
   assert.equal(r.outcome?.status, "accepted");
   await ext.drain();
-  assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, "uncollected");
+  assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, "queued", "not before its validBefore has passed");
+  // Closing the month looks again: validBefore has passed and the authorization is unused.
   setSimulatedTime(Date.UTC(2026, 10, 2, 0, 0, 0));
   await log.closePeriod("2026-10");
+  assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, "uncollected");
   assert.equal(log.handle("/lines/2026-10").body, "");
   assert.equal(log.handle("/settlements/2026-10").body, "");
 });

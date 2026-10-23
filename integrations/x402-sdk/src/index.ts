@@ -1,5 +1,5 @@
 /**
- * Integration kit: the draft 2 solidarity extension on the x402 TypeScript SDK
+ * Integration kit: the draft 3 solidarity extension on the x402 TypeScript SDK
  * (@x402/core and @x402/evm 2.28.0).
  *
  * A proposal, not part of x402, and not affiliated with or endorsed by x402,

@@ -322,7 +322,7 @@ test("the descriptor cache never fetches a log URL that is not https", async () 
 
 test("the descriptor cache refuses a descriptor for another log or another version", async () => {
   const cache = createDescriptorCache({ fetch: async () => new Response(JSON.stringify({ ...descriptor, log: "https://other.example/solidarity" })) });
-  await assert.rejects(cache.refresh(LOG), /did not return a draft 2 descriptor/);
+  await assert.rejects(cache.refresh(LOG), /did not return a version 2 descriptor/);
   assert.equal(cache.get(LOG), undefined);
   const v1 = createDescriptorCache({ fetch: async () => new Response(JSON.stringify({ ...descriptor, version: 1 })) });
   await assert.rejects(v1.refresh(LOG));

@@ -13,7 +13,7 @@
  */
 
 import { LogBook } from "./book.ts";
-import type { ProofResult } from "./book.ts";
+import type { LogBookOptions, ProofResult, RetireOptions } from "./book.ts";
 import type { SigningKey } from "./ledger.ts";
 import { formatLine, formatSettlement } from "./ledger.ts";
 import { mandatePolicy } from "./client.ts";
@@ -53,6 +53,8 @@ interface ProcessorShare {
   committedIn: string;
   collectedIn?: string;
   line?: string;
+  /** Never collected: still below minCollection when the log retired. */
+  uncollected?: boolean;
 }
 
 export class ProcessorHolder {
@@ -64,11 +66,17 @@ export class ProcessorHolder {
   private readonly shares = new Map<string, ProcessorShare>();
   private readonly byPurchase = new Map<string, string>();
   private readonly payouts: Array<{ period: string; fund: string; asset: string; reference: string; amount: bigint }> = [];
+  private stopped = false;
 
-  constructor(opts: { descriptor: LogDescriptor; key: SigningKey; clock?: () => number }) {
+  /**
+   * `persistStatement` stores each statement durably before it is published
+   * or sent to a witness or the fund (LogBookOptions.persist;
+   * https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements").
+   */
+  constructor(opts: { descriptor: LogDescriptor; key: SigningKey; clock?: () => number; persistStatement?: LogBookOptions["persist"] }) {
     if (opts.descriptor.accepts) throw new Error("a processor-mode descriptor omits accepts");
-    this.book = new LogBook(opts.descriptor, opts.key);
     this.clock = opts.clock ?? (() => Math.floor(Date.now() / 1000));
+    this.book = new LogBook(opts.descriptor, opts.key, { persist: opts.persistStatement, clock: this.clock });
   }
 
   private get minCollection(): bigint {
@@ -140,6 +148,7 @@ export class ProcessorHolder {
    * zero, cap reached, credit used it up).
    */
   recordPurchase(p: { owner: string; purchaseId: string; amount: string; asset: string }): string | undefined {
+    if (this.stopped) return undefined;
     const key = ownerKey(p.owner, p.asset);
     const o = this.owners.get(key);
     if (!o || o.suspended || this.suspendedOwners.has(p.owner) || o.counter.isOff) return undefined;
@@ -208,7 +217,7 @@ export class ProcessorHolder {
   }
 
   /**
-   * Collect for the current period: per owner, all uncollected shares if their
+   * Collect for the current period: per owner, all shares not yet collected if their
    * sum reaches `minCollection`, else they carry forward. A line's period is
    * the month the processor collected it. Pays each fund once for the period
    * (recorded as `payout:<reference>`; this model moves no money).
@@ -219,7 +228,7 @@ export class ProcessorHolder {
     const carried: string[] = [];
     const perOwner = new Map<string, ProcessorShare[]>();
     for (const s of this.shares.values()) {
-      if (s.collectedIn) continue;
+      if (s.collectedIn || s.uncollected) continue;
       perOwner.set(s.owner, [...(perOwner.get(s.owner) ?? []), s]);
     }
     const perFund = new Map<string, bigint>();
@@ -248,11 +257,37 @@ export class ProcessorHolder {
     return { period, collected, carried };
   }
 
-  /** Close a period after its collection. */
+  /** Close a period after its collection. `issuedAt` defaults to the holder's clock, the time the statement is first written. */
   closePeriod(period: string, issuedAt?: number): PublishedStatement {
     if (period >= periodOf(this.clock())) throw new Error(`cannot close ${period} before it ends`);
     const lines = [...this.shares.values()].filter((s) => s.collectedIn === period).map((s) => s.line as string);
     return this.book.close(period, lines, issuedAt);
+  }
+
+  /** Step 1 of retiring (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"): the holder records no more shares. */
+  stopAccepting(): void {
+    this.stopped = true;
+  }
+
+  /**
+   * Retire this log (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"). It refuses, and changes nothing,
+   * until the last period with a collected line has its statement and each
+   * kid in `requireCosigners` has a valid cosignature on it. Then it records
+   * no more shares (step 1, which `stopAccepting` does on its own first),
+   * shares still carried below `minCollection` become uncollected, since they
+   * are never collected now (step 2, every share resolved), and `until` is set
+   * on the log's key to the last closed period, whose statement is the final
+   * one (step 3). Collect first. Returns the final period.
+   */
+  retire(opts: RetireOptions = {}): string {
+    const last = this.book.lastClosed;
+    if (!last) throw new Error("a log retires with a final statement, and this one has published none");
+    const latest = [...this.shares.values()].reduce<string | undefined>((m, s) => (s.collectedIn !== undefined && (m === undefined || s.collectedIn > m) ? s.collectedIn : m), undefined);
+    if (latest !== undefined && latest > last.period) throw new Error(`${latest} holds collected shares and has no statement yet`);
+    const period = this.book.retire(opts);
+    this.stopped = true;
+    for (const s of this.shares.values()) if (!s.collectedIn) s.uncollected = true;
+    return period;
   }
 
   /** What the fund sees of its payouts (for its "money arrived" check). */
@@ -268,6 +303,7 @@ export class ProcessorHolder {
   private proof(id: string): ProofResult {
     const s = this.shares.get(id);
     if (!s) return [404, { error: "not found" }];
+    if (s.uncollected) return [200, { status: "uncollected" }];
     if (!s.collectedIn) return [200, { status: "queued" }];
     return this.book.included(s.collectedIn, id) ?? [200, { status: "queued" }];
   }

@@ -47,13 +47,14 @@ test("conformance: every facilitator case gives the expected outcome, in order, 
 
 // ---- a small world for scenario tests ------------------------------------------
 
-async function world(opts: { now?: number } = {}) {
+async function world(opts: { now?: number; descriptor?: LogDescriptor; logChain?: (chain: SimulatedChain) => S.LogChain } = {}) {
   const now = opts.now ?? Date.UTC(2026, 11, 10, 12) / 1000;
   const chain = new SimulatedChain({ now });
   const agent = privateKeyToAccount(generatePrivateKey());
   chain.mint(USDC, agent.address, 1_000_000_000n);
-  const key = S.generateSigningKey("EdDSA", DESCRIPTOR.keys[0].kid);
-  const log = new S.SolidarityLog({ descriptor: DESCRIPTOR, key, chain, clock: () => chain.now });
+  const descriptor = opts.descriptor ?? DESCRIPTOR;
+  const key = S.generateSigningKey("EdDSA", descriptor.keys[0].kid);
+  const log = new S.SolidarityLog({ descriptor, key, chain: opts.logChain ? opts.logChain(chain) : chain, clock: () => chain.now });
   const counter = new S.CapCounter({ ...POLICY, cap: { ...POLICY.cap, amount: "1000000000" } });
   const ctx = { policy: POLICY, counter, signer: agent, descriptor: DESCRIPTOR, now };
   const config = { payer: agent.address, payerAuthorizer: agent.address, receiver: FUND_ADDR as `0x${string}`, receiverAuthorizer: "0x3333333333333333333333333333333333333333" as const, token: USDC as `0x${string}`, withdrawDelay: 86400, salt: `0x${"0".repeat(63)}9` as `0x${string}` };
@@ -67,7 +68,7 @@ async function world(opts: { now?: number } = {}) {
     assert.ok(d.attached, d.attached ? "" : d.why);
     return (d as Extract<S.ShareDecision, { attached: true }>).info;
   }
-  return { chain, agent, log, key, ctx, config, req, declared, payload, ok, share };
+  return { chain, agent, log, key, ctx, counter, descriptor, config, req, declared, payload, ok, share };
 }
 
 test("/verify is untouched: same object back, nothing reserved", async () => {
@@ -91,7 +92,7 @@ test("purchase basis follows the table in the spec", () => {
   assert.deepEqual(S.purchaseBasis(pp(r("exact", "48"), { type: "refund" }), r("exact", "48"), sr), { ok: false }, "a refund payload never carries a share, whatever its scheme");
   assert.deepEqual(S.purchaseBasis(pp(r("upto", "1000"), { type: "refund" }), r("upto", "400"), sr), { ok: false });
   assert.deepEqual(S.purchaseBasis(pp(r("upto", "1000")), r("upto", "400"), sr), { ok: true, basis: 400n }, "settle-time amount");
-  assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "voucher" }), r("batch-settlement", "700"), sr), { ok: false }, "batch-settlement purchases carry no share in draft 2");
+  assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "voucher" }), r("batch-settlement", "700"), sr), { ok: false }, "batch-settlement purchases carry no share in draft 3");
   assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "refund" }), r("batch-settlement", "700"), sr), { ok: false });
   assert.deepEqual(S.purchaseBasis(pp(r("batch-settlement", "700"), { type: "claim" }), r("batch-settlement", "700"), sr), { ok: false });
   assert.deepEqual(S.purchaseBasis(pp(r("auth-capture", "900", { paymentFlow: "authorization" })), r("auth-capture", "900"), sr), { ok: true, basis: 700n }, "what the charge collected");
@@ -119,15 +120,19 @@ test("refunds: keep only; a refund settle never triggers or adjusts a share", as
   assert.throws(() => w.log.book.addSettlement("2026-12", "x"), /closed/);
 });
 
-test("an exact share whose transfer fails is uncollected and left out of the batch", async () => {
+test("an exact share whose transfer fails is uncollected once it can no longer execute, and left out of the batch", async () => {
   const w = await world();
   const accepted = w.req("48000000");
   const info = await w.share(accepted);
   const p = (info.payment as NonNullable<SolidarityInfo["payment"]>).payload as unknown as S.ExactEip3009Payload;
-  w.chain.cancelAuthorization(USDC, p.authorization.from, p.authorization.nonce); // the agent voided it (EIP-3009 cancelAuthorization)
+  // The agent's balance is gone before the log submits the share: the transfer fails, unused.
+  w.chain.transfer(USDC, w.agent.address, "0x5555555555555555555555555555555555555555", w.chain.balanceOf(USDC, w.agent.address));
   const r = await w.log.onSettled(w.payload(accepted, info), accepted, w.ok());
   assert.equal(r.outcome?.status, "accepted", "accepted is provisional");
   await r.followUp;
+  assert.equal(w.log.inspect(info.id as string)?.state, "queued", "a failed submit does not show the transfer never executed");
+  w.chain.now = Number(p.authorization.validBefore) + 30;
+  await w.log.reconcileExact();
   assert.equal(w.log.inspect(info.id as string)?.state, "uncollected");
   assert.deepEqual(JSON.parse(w.log.handle(`/proofs/${info.id}`).body), { status: "uncollected" });
   w.chain.now = Date.UTC(2027, 0, 3) / 1000;
@@ -382,6 +387,8 @@ test("an upto share that records less leaves no headroom: its voucher cannot be 
   assert.equal(r.outcome?.channel?.signature, undefined, "an accepted outcome carries no voucher");
   assert.ok(S.applyOutcomeToChannel(ch, r.outcome));
   assert.equal(ch.chargedCumulativeAmount, "10000");
+  // "Owner policy": the cap counts the share at the amount it signed, whatever amount is recorded later.
+  assert.equal(w.counter.committed("2026-12"), 10000n);
   // A junk share naming the channel learns no voucher.
   const junk = { version: 2, log: "https://elsewhere.example/solidarity", id: S.generateShareId(), rate: "0.001", fund: POLICY.fund, payment: { accepted: { scheme: "batch-settlement" }, payload: { voucher: { channelId: ch.channelId } } } } as unknown as SolidarityInfo;
   const probe = await w.log.onSettled(w.payload(w.req("1000000"), junk), w.req("1000000"), w.ok());

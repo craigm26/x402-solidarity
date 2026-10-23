@@ -86,7 +86,7 @@ export function createDescriptorCache(opts: DescriptorCacheOptions = {}): Descri
       const res = await doFetch(log, { headers: { accept: "application/json" } });
       if (!res.ok) throw new Error(`GET ${log} answered ${res.status}`);
       const body = (await res.json()) as unknown;
-      if (!isUsableDescriptor(body, log)) throw new Error(`GET ${log} did not return a draft 2 descriptor for that log`);
+      if (!isUsableDescriptor(body, log)) throw new Error(`GET ${log} did not return a version 2 descriptor for that log`);
       entries.delete(log);
       entries.set(log, { descriptor: body, expiresAt: now() + ttl });
       evict();

@@ -1,7 +1,7 @@
 {
   "name": "x402-solidarity-sdk-kit",
   "version": "0.1.0",
-  "description": "Integration kit: the draft 2 solidarity extension wired into the x402 TypeScript SDK 2.28.0 (client, resource server, facilitator). A proposal, simulated; no fund exists.",
+  "description": "Integration kit: the draft 3 solidarity extension wired into the x402 TypeScript SDK 2.28.0 (client, resource server, facilitator). A proposal, simulated; no fund exists.",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",

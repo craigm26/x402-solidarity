@@ -23,7 +23,7 @@
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import * as S from "../../src/solidarity/index.ts";
-import type { ExactEip3009Payload, JwsEnvelope, LogDescriptor, OwnerPolicy, PaymentPayload, PaymentRequirements, SigningKey, SolidarityInfo, SolidarityOutcome } from "../../src/solidarity/index.ts";
+import type { ExactEip3009Payload, JwsEnvelope, LogDescriptor, OwnerPolicy, PaymentPayload, PaymentRequirements, PublishedStatement, SigningKey, SolidarityInfo, SolidarityOutcome } from "../../src/solidarity/index.ts";
 import type { JwsAlg } from "../../src/solidarity/ledger.ts";
 import { nextPeriod, periodOf, periodStart, previousPeriod, sameAccount } from "../../src/solidarity/utils.ts";
 import type { DidRole } from "./did.ts";
@@ -196,8 +196,6 @@ export function usdc(units: bigint | string): string {
   return `${neg ? "-" : ""}${a / 1_000_000n}${frac ? `.${frac}` : ""}`;
 }
 
-const witnessRefusal = (period: string, reason: string): string => `the demo witness refuses ${period}: ${reason}`;
-
 function summarize(outcome: SolidarityOutcome | undefined, rec: { state?: string; exact?: { transaction?: string } } | undefined): Summary {
   return {
     status: outcome?.status ?? null,
@@ -295,7 +293,6 @@ export class Engine {
 
     const problems: string[] = [];
     const replayed = new Map<string, Summary>();
-    let refused: EventRow | undefined;
     for (const e of this.store.events()) {
       if (e.at > this.lastAt) this.lastAt = e.at;
       this.logNow = e.at;
@@ -316,7 +313,7 @@ export class Engine {
         }
         case "cycle-end": {
           const got = replayed.get(e.key);
-          if (!got || toJson(got) !== toJson(e.body.summary)) problems.push(`cycle ${e.key}: replay decided ${toJson(got ?? null)}, the record says ${toJson(e.body.summary)}`);
+          if (!got || (toJson(got) !== toJson(e.body.summary) && !this.legacyNeverSent(e, got))) problems.push(`cycle ${e.key}: replay decided ${toJson(got ?? null)}, the record says ${toJson(e.body.summary)}`);
           if (this.unfinished?.key === e.key) this.unfinished = undefined;
           break;
         }
@@ -333,18 +330,42 @@ export class Engine {
           else this.log.addCosignature(e.body.period, { format: "jws", signature: e.body.jws });
           break;
         }
-        case "witness-refused":
-          refused ??= e;
+        case "retire": {
+          // The descriptor is rebuilt above with no `until`; retiring again at the recorded time sets it.
+          try {
+            const final = this.log.retire();
+            if (final !== e.body.period) problems.push(`retire: replay retired with ${final}, the record says ${e.body.period}`);
+          } catch (err) {
+            problems.push(`retire: ${msg(err)}`);
+          }
           break;
+        }
         default:
-          break; // genesis, intent, result, lookup, close-intent, fund-check, fund-refused: read by key when needed
+          break; // genesis, intent, result, lookup, close-intent, fund-check, fund-refused, witness-refused: read by key when needed
       }
     }
     problems.push(...this.journal.divergence);
     if (problems.length) throw new Error(problems.join("; "));
     this.journal.mode = "live";
-    // A witness refusal stops the log for good: nothing is closed or cosigned after it.
-    if (refused) this.degraded = witnessRefusal(refused.body.period, refused.body.reason);
+  }
+
+  /**
+   * Records written before draft 3 can answer a share "not submitted before
+   * validBefore" (via "engine"): that code, resuming with under a minute
+   * left, never sent the share and reported it uncollected at once, before
+   * its validBefore had passed, which draft 3 forbids. Replay now keeps it
+   * queued at that recorded clock reading. When its month closes (after its
+   * validBefore), that recorded answer is taken as unused, as the code that
+   * wrote it took it, and the share is uncollected, so the statement is the
+   * same. Draft 3 would read the chain after validBefore instead; this code
+   * does (execute), and never writes `via: "engine"`. This is the only
+   * difference replay accepts, and only for such a cycle.
+   */
+  private legacyNeverSent(end: EventRow, got: Summary): boolean {
+    const c = this.store.get("cycle", end.key);
+    const nonce = String(c?.body.share.info.payment.payload.authorization.nonce ?? "").toLowerCase();
+    const r = this.store.get("result", `submit:${nonce}`)?.body;
+    return r?.via === "engine" && r.ok === false && got.state === "queued" && end.body.summary?.state === "uncollected" && toJson({ ...got, state: "uncollected" }) === toJson(end.body.summary);
   }
 
   /** Why a stored cosign row must not be re-added, or undefined. */
@@ -448,6 +469,16 @@ export class Engine {
     return row;
   }
 
+  /**
+   * The log's clock moves to a recorded answer's time, live and in replay
+   * alike: the log reads the clock after an answer (an exact share is
+   * uncollected only once its validBefore has passed), and every reading it
+   * takes comes from the record.
+   */
+  private seen(at: number): void {
+    if (at > this.logNow) this.logNow = at;
+  }
+
   private async armAlarm(at: number): Promise<void> {
     if (this.config.mode === "live") await this.deps.setAlarm?.(at);
   }
@@ -462,7 +493,11 @@ export class Engine {
 
   private backend(): JournalBackend {
     return {
-      recorded: (kind, nonce) => this.store.get(kind, `${kind === "result" ? "submit" : "lookup"}:${nonce}`)?.body,
+      recorded: (kind, nonce) => {
+        const row = this.store.get(kind, `${kind === "result" ? "submit" : "lookup"}:${nonce}`);
+        if (row) this.seen(row.at);
+        return row?.body;
+      },
       submitShare: (accepted, payload) => this.submitShare(accepted, payload),
       lookupShare: (accepted, payload) => this.lookupShare(accepted, payload),
     };
@@ -478,11 +513,15 @@ export class Engine {
   /**
    * Submit an authorization and wait for a final answer. A failed answer is
    * never taken as final: the chain decides, once the authorization is used
-   * or expired. Resubmission happens only when the chain shows it unused, at
-   * least RESUBMIT_GAP after the last try, with MIN_VALIDITY left; EIP-3009
-   * nonces make a second execution impossible anyway. A used authorization
-   * whose transfer the log search does not show yet throws NotYet, so no
-   * answer is recorded until the transfer is found.
+   * or expired. A failure is returned only after the chain was read past
+   * validBefore + FINAL_AFTER and showed the authorization unused, which is
+   * what draft 3 asks before an exact share is reported uncollected.
+   * Resubmission happens only when the chain shows it unused, at least
+   * RESUBMIT_GAP after the last try, with MIN_VALIDITY left; EIP-3009 nonces
+   * make a second execution impossible anyway. An authorization with less
+   * than MIN_VALIDITY left is never sent: the loop only waits for it to
+   * expire. A used authorization whose transfer the log search does not show
+   * yet throws NotYet, so no answer is recorded until the transfer is found.
    */
   private async execute(accepted: PaymentRequirements, payload: ExactEip3009Payload, o: { intentAt: number; fresh: boolean; cycle: EventRow }): Promise<SubmitAnswer> {
     const a = payload.authorization;
@@ -493,18 +532,22 @@ export class Engine {
     let lastError: string | undefined;
     let check = !o.fresh;
     for (;;) {
-      if (check && (await this.io.authorizationState(a.from, a.nonce))) {
-        const w = this.windowFor(o.cycle, payload);
-        const t = await this.io.findTransfer(accepted, payload, w);
-        if (t && sameAccount(t.to, a.to) && t.value === BigInt(a.value)) return { ok: true, transaction: t.transaction, via: "chain" };
-        if (t) return { ok: false, error: `the authorization was used by ${t.transaction}, which is not a transfer of ${a.value} to ${a.to}`, via: "chain" };
-        // Used, so it executed, but the log search does not show it yet (an RPC whose log index
-        // lags the node that answered). Never final: the cycle stays unfinished and is looked up again.
-        throw new NotYet(`the authorization ${a.nonce.toLowerCase()} was used, but its transfer is not found yet in blocks ${w.fromBlock} to ${w.toBlock}; it is looked up again on the next alarm or tick`);
+      const now = this.io.now();
+      const final = now > validBefore + FINAL_AFTER;
+      if (check || final) {
+        if (await this.io.authorizationState(a.from, a.nonce)) {
+          const w = this.windowFor(o.cycle, payload);
+          const t = await this.io.findTransfer(accepted, payload, w);
+          if (t && sameAccount(t.to, a.to) && t.value === BigInt(a.value)) return { ok: true, transaction: t.transaction, via: "chain" };
+          if (t) return { ok: false, error: `the authorization was used by ${t.transaction}, which is not a transfer of ${a.value} to ${a.to}`, via: "chain", used: true };
+          // Used, so it executed, but the log search does not show it yet (an RPC whose log index
+          // lags the node that answered). Never final: the cycle stays unfinished and is looked up again.
+          throw new NotYet(`the authorization ${a.nonce.toLowerCase()} was used, but its transfer is not found yet in blocks ${w.fromBlock} to ${w.toBlock}; it is looked up again on the next alarm or tick`);
+        }
+        // Unused, read after validBefore + FINAL_AFTER: it can never execute now.
+        if (final) return { ok: false, error: lastError ?? "not executed before validBefore", via: "chain", used: false };
       }
       check = true;
-      const now = this.io.now();
-      if (now > validBefore + FINAL_AFTER) return { ok: false, error: lastError ?? "not executed before validBefore", via: "chain" };
       const canTry = !answered && attempts < MAX_ATTEMPTS && validBefore - now >= MIN_VALIDITY;
       if (canTry && now - lastTry >= RESUBMIT_GAP) {
         attempts++;
@@ -520,25 +563,26 @@ export class Engine {
     }
   }
 
+  /**
+   * The log's submitExact, write-ahead. With less than MIN_VALIDITY left the
+   * authorization is never sent, but no answer is recorded before its
+   * validBefore has passed and the chain shows it unused: draft 3 forbids
+   * reporting the share uncollected before that ("Share kinds"), even here,
+   * where this engine is the authorization's only holder.
+   */
   private async submitShare(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<SubmitAnswer> {
     const c = this.current as EventRow;
     const nonce = payload.authorization.nonce.toLowerCase();
     let intent = this.store.get("intent", `submit:${nonce}`);
     let fresh = false;
     if (!intent) {
-      if (Number(payload.authorization.validBefore) - this.io.now() < MIN_VALIDITY) {
-        // Never sent: nobody but this engine ever held it, so there is nothing to wait for.
-        const a: SubmitAnswer = { ok: false, error: "not submitted before validBefore", via: "engine" };
-        this.append("result", `submit:${nonce}`, this.liveNow(), { ...a, role: "share", cycle: c.key });
-        return a;
-      }
       intent = this.append("intent", `submit:${nonce}`, this.liveNow(), { cycle: c.key, role: "share" });
       await this.store.sync();
       await this.armAlarm(Number(payload.authorization.validBefore) + FINAL_AFTER);
       fresh = true;
     }
     const a = await this.execute(accepted, payload, { intentAt: intent.at, fresh, cycle: c });
-    this.append("result", `submit:${nonce}`, this.liveNow(), { ...a, role: "share", cycle: c.key });
+    this.seen(this.append("result", `submit:${nonce}`, this.liveNow(), { ...a, role: "share", cycle: c.key }).at);
     return a;
   }
 
@@ -551,7 +595,7 @@ export class Engine {
       found: t ? { transaction: t.transaction, token: t.token, to: t.to, value: t.value.toString() } : null,
       window: { fromBlock: w.fromBlock.toString(), toBlock: w.toBlock.toString() },
     };
-    this.append("lookup", `lookup:${nonce}`, this.liveNow(), answer);
+    this.seen(this.append("lookup", `lookup:${nonce}`, this.liveNow(), answer).at);
     return answer;
   }
 
@@ -643,6 +687,7 @@ export class Engine {
     }
     notes.push(...(await this.closeDue()));
     notes.push(...(await this.cosignPending()));
+    notes.push(...this.retireIfDue());
     return notes;
   }
 
@@ -660,6 +705,7 @@ export class Engine {
   private async preflight(): Promise<{ stop: string } | { account: ReturnType<typeof privateKeyToAccount>; block: bigint }> {
     const stop = (s: string) => ({ stop: s });
     if (this.degraded) return stop(`degraded: ${this.degraded}`);
+    if (this.log?.retired) return stop(`retired: the log's final statement is for ${this.log.book.finalPeriod}`);
     if (this.config.paused) return stop("paused (PAUSED is 1)");
     const end = endBoundary(this.config.endDate);
     if (end === undefined) return stop(`END_DATE ${this.config.endDate} is not a YYYY-MM-DD date`);
@@ -776,7 +822,7 @@ export class Engine {
     const g = this.genesis as Genesis;
     const log = this.log as S.SolidarityLog;
     let p = log.book.nextToClose ?? g.keyFrom;
-    while (p < periodOf(this.liveNow()) && !this.unfinished && !this.degraded) {
+    while (p < periodOf(this.liveNow()) && !this.unfinished && !this.degraded && !log.retired) {
       await this.closeOne(p);
       notes.push(`closed ${p}`);
       p = nextPeriod(p);
@@ -798,9 +844,9 @@ export class Engine {
       // No await between closePeriod returning and this write.
       this.append("close", p, intent.at, { period: p, issuedAt: intent.body.issuedAt, jws: pub.statement.signature, hash: S.statementHash(S.decodeStatement(pub.statement).payload) });
     }
+    // Each cosigner checks on its own; a refusal by either leaves the statement as it is.
     await this.cosignWitness(p);
-    // A refusal by the witness stops everything after it, the fund's cosignature included.
-    if (!this.degraded) await this.cosignFund(p);
+    await this.cosignFund(p);
   }
 
   private resolver(): S.KeyResolver {
@@ -821,8 +867,7 @@ export class Engine {
     const notes: string[] = [];
     for (const p of this.closedPeriods()) {
       if (this.degraded) break;
-      if (!this.store.get("cosign", `${p}:witness`)) await this.cosignWitness(p);
-      if (this.degraded) break;
+      if (!this.store.get("cosign", `${p}:witness`) && !this.store.get("witness-refused", p)) await this.cosignWitness(p);
       if (!this.store.get("cosign", `${p}:fund`) && !this.store.get("fund-refused", p)) {
         await this.cosignFund(p);
         if (this.store.get("cosign", `${p}:fund`)) notes.push(`fund cosigned ${p}`);
@@ -832,46 +877,90 @@ export class Engine {
   }
 
   /**
-   * The demo witness. A fresh Witness remembers nothing across restarts, so the
-   * engine keeps its memory in the witness's own stored cosign rows: `previous`
-   * must be the payloadHash it cosigned for the month before (or null for the
-   * log's first month), it cosigns months in order, and it never cosigns a
-   * second payload for a month. A refusal is recorded (witness-refused) and
-   * stops the log, across restarts too.
+   * The demo witness: the library's Witness, with its record kept in its own
+   * stored cosign rows, never taken from the log's book. A witness keeps its
+   * record across restarts and never skips the `previous` check for want of it
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund"). It cosigns months in order: `previous` must
+   * name the payload of the month before, the last one it cosigned or one it
+   * reaches by walking the published statements forward from there (through a
+   * month it refused). It never cosigns a second payload for a month. A
+   * refusal is recorded (witness-refused, with the payload refused) and
+   * stands: the statement stays as it is, and the log goes on ("Refusals"),
+   * with the witness free to cosign later months that chain through it.
    */
   private async cosignWitness(p: string): Promise<void> {
-    if (this.degraded || this.store.get("cosign", `${p}:witness`)) return;
+    if (this.degraded || this.store.get("cosign", `${p}:witness`) || this.store.get("witness-refused", p)) return;
     const log = this.log as S.SolidarityLog;
     const closed = log.book.get(p);
     if (!closed) throw new Error(`${p} is not closed`);
     const d = S.decodeStatement(closed.pub.statement);
     const g = this.genesis as Genesis;
-    let want: string | null = null;
     if (p !== g.keyFrom) {
       const before = previousPeriod(p);
-      // In order: a month before that was closed but not cosigned yet (a restart in between) comes first.
-      if (!this.store.get("cosign", `${before}:witness`) && log.book.get(before)) await this.cosignWitness(before);
-      if (this.degraded) return;
-      want = this.store.get("cosign", `${before}:witness`)?.body.payloadHash ?? "missing";
+      // In order: a month before that was closed but neither cosigned nor refused yet (a restart in between) comes first.
+      if (log.book.get(before) && !this.store.get("cosign", `${before}:witness`) && !this.store.get("witness-refused", before)) await this.cosignWitness(before);
     }
-    const refuse = (reason: string): void => {
-      this.append("witness-refused", p, this.liveNow(), { period: p, reason });
-      this.degraded = witnessRefusal(p, reason);
-    };
-    if (d.payload.previous !== want) {
-      refuse(want === "missing" ? "it has not cosigned the month before" : "previous does not chain to the statement it cosigned for the month before");
-      return;
+    const record = this.witnessRecord();
+    const last = record.map((e) => e.period).sort().at(-1);
+    const history: PublishedStatement[] = [];
+    for (let q = last ? nextPeriod(last) : g.keyFrom; q < p; q = nextPeriod(q)) {
+      const h = log.book.get(q);
+      if (h) history.push(h.pub);
     }
     const k = this.keys as Record<DidRole, SigningKey>;
     let env: JwsEnvelope;
     try {
-      env = new S.Witness(k.witness).cosign(closed.pub, { resolveKey: this.resolver(), descriptor: this.descriptor, files: { lines: closed.lines, settlements: closed.settlements } });
+      env = new S.Witness(k.witness, { record }).cosign(closed.pub, { resolveKey: this.resolver(), descriptor: this.descriptor, history, files: { lines: closed.lines, settlements: closed.settlements } });
     } catch (e) {
-      refuse(msg(e));
+      this.append("witness-refused", p, this.liveNow(), { period: p, reason: msg(e), payloadHash: d.hash });
       return;
     }
+    // The cosign row is the witness's record, written before the cosignature is published.
     this.append("cosign", `${p}:witness`, this.liveNow(), { period: p, role: "witness", kid: k.witness.kid, jws: env.signature, payloadHash: d.hash });
     log.addCosignature(p, env);
+  }
+
+  /** The demo witness's record: the payload hash in each of its own stored cosign rows. */
+  private witnessRecord(): S.WitnessRecordEntry[] {
+    const log = (this.genesis as Genesis).log;
+    const out: S.WitnessRecordEntry[] = [];
+    for (const q of this.closedPeriods()) {
+      const c = this.store.get("cosign", `${q}:witness`);
+      if (c) out.push({ log, period: q, hash: String(c.body.payloadHash) });
+    }
+    return out;
+  }
+
+  /**
+   * After END_DATE the log retires (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log") instead of closing
+   * empty months for as long as the Worker exists. It starts no purchase after
+   * END_DATE (step 1: it is its own only buyer). Once no purchase is
+   * unfinished, every month in which it recorded a share has its statement
+   * and every share is resolved (step 2, which SolidarityLog.retire checks),
+   * and the last statement's cosignatures are attached or refused by both the
+   * demo witness and the demo fund, it sets `until` on its key to that month
+   * (step 3). It then closes nothing more, and keeps serving everything it
+   * published. Until then closeDue goes on closing months as they end.
+   */
+  private retireIfDue(): string[] {
+    const log = this.log as S.SolidarityLog;
+    if (log.retired || this.unfinished || this.degraded) return [];
+    const end = endBoundary(this.config.endDate);
+    const now = this.liveNow();
+    if (end === undefined || now < end) return [];
+    const last = log.book.lastClosed?.period;
+    if (!last) return [];
+    const settled = (role: "witness" | "fund") => this.store.get("cosign", `${last}:${role}`) ?? this.store.get(role === "witness" ? "witness-refused" : "fund-refused", last);
+    if (!settled("witness") || !settled("fund")) return [];
+    this.logNow = now;
+    let final: string;
+    try {
+      final = log.retire();
+    } catch {
+      return []; // a later month holds a share, or a share is not resolved yet: months keep closing
+    }
+    this.append("retire", final, now, { period: final });
+    return [`retired: the final statement is for ${final}`];
   }
 
   /**
@@ -979,7 +1068,8 @@ export class Engine {
     // balance, the RPC endpoint), so the headline must not say purchases are running.
     const lastTick = this.store.status("lastTick");
     const waiting = typeof lastTick?.stop === "string" && !/^cycle [0-9]+ is unfinished$/.test(lastTick.stop) ? (lastTick.stop as string) : null;
-    const state = this.degraded ? "degraded" : this.config.paused ? "paused" : end !== undefined && now >= end ? "ended" : waiting ? "waiting" : "running";
+    const retired = !this.degraded && !!this.log?.retired;
+    const state = this.degraded ? "degraded" : retired ? "retired" : this.config.paused ? "paused" : end !== undefined && now >= end ? "ended" : waiting ? "waiting" : "running";
     const log = this.log;
     const cycles: CycleView[] = [];
     if (log && !this.degraded) {
@@ -1005,6 +1095,7 @@ export class Engine {
         const closed = log.book.get(p);
         if (!closed) continue;
         const refused = this.store.get("fund-refused", p)?.body;
+        const witnessRefused = this.store.get("witness-refused", p)?.body;
         statements.push({
           period: p,
           size: closed.payload.size,
@@ -1013,6 +1104,7 @@ export class Engine {
           issuedAt: closed.payload.issuedAt,
           previous: closed.payload.previous,
           witness: !!this.store.get("cosign", `${p}:witness`),
+          witnessRefused: witnessRefused ? String(witnessRefused.reason) : null,
           fund: !!this.store.get("cosign", `${p}:fund`),
           fundRefused: refused ? { reason: refused.reason, definitive: refused.definitive } : null,
         });
@@ -1029,6 +1121,7 @@ export class Engine {
       origin: g?.origin ?? this.config.origin,
       log: g?.log ?? null,
       keyFrom: g?.keyFrom ?? null,
+      finalPeriod: retired ? (this.log?.book.finalPeriod ?? null) : null,
       payer: g?.payer ?? null,
       fund: FUND,
       facilitator: this.config.mode === "live" ? this.config.facilitatorUrl : null,
@@ -1065,13 +1158,15 @@ export interface StatementView {
   issuedAt: number;
   previous: string | null;
   witness: boolean;
+  /** Why the demo witness refused this month, if it did. */
+  witnessRefused: string | null;
   fund: boolean;
   fundRefused: { reason: string; definitive: boolean } | null;
 }
 
 export interface Snapshot {
   mode: Mode;
-  state: "running" | "waiting" | "paused" | "ended" | "degraded";
+  state: "running" | "waiting" | "paused" | "ended" | "retired" | "degraded";
   degraded: string | null;
   /** Why the last tick started no purchase, while that is the state. */
   waiting: string | null;
@@ -1081,6 +1176,8 @@ export interface Snapshot {
   origin: string;
   log: string | null;
   keyFrom: string | null;
+  /** The final statement's month, once the log has retired. */
+  finalPeriod: string | null;
   payer: string | null;
   fund: string;
   facilitator: string | null;

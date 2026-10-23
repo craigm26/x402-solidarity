@@ -30,15 +30,25 @@
  * a share that does reach the fund is never left out of the batch because a
  * receipt was slow. Only once the share's validBefore has passed (after which
  * an unexecuted authorization can never execute) and `pendingGraceSeconds`
- * more without a receipt does it report the transfer as not made, and the
- * share is uncollected unless `findExactTransfer` finds it.
+ * more without a receipt does it report the transfer as not made.
+ *
+ * A transfer reported as not made is not an uncollected share. Under draft 3
+ * the log reports an exact share uncollected only once its validBefore has
+ * passed and the chain shows the authorization unused (solidarity.md, "Share
+ * kinds"), which takes `authorizationUsed` (EIP-3009 authorizationState) and,
+ * for a cancelled authorization, `authorizationCanceled`. Pass them in
+ * `fallback`. Without them the share stays queued: its month closes without
+ * it after the claim grace, and it is recorded late if `findExactTransfer`
+ * later finds it executed (`log.reconcileExact()`).
  *
  * Not provided here, because a FacilitatorEvmSigner cannot do them:
  * - batch-settlement channel reads and claims (`channelState`, `claim`): pass
  *   them in `fallback`, or batch-settlement shares are skipped (channel not found).
  * - `findExactTransfer` (finding an authorization someone else executed): it
  *   needs event logs (AuthorizationUsed and Transfer) from an RPC client.
- *   Without it, such a share is reported uncollected.
+ *   Without it, such a share is never seen collected.
+ * - `authorizationUsed` and `authorizationCanceled` (above): a contract read
+ *   and an event log from an RPC client.
  */
 
 import type { PaymentPayload, PaymentRequirements, SettleResponse, VerifyResponse } from "@x402/core/types";
@@ -56,7 +66,10 @@ export interface ShareSettler {
 }
 
 export interface FacilitatorLogChainOptions {
-  /** Channel reads, claims and findExactTransfer from elsewhere (an RPC client; the simulated chain in tests). */
+  /**
+   * Channel reads, claims, findExactTransfer, authorizationUsed and authorizationCanceled from
+   * elsewhere (an RPC client; the simulated chain in tests).
+   */
   fallback?: Partial<LogChain>;
   /**
    * The wait before the n-th re-settle of a share whose settle came back
@@ -123,6 +136,12 @@ export function facilitatorLogChain(settler: ShareSettler, opts: FacilitatorLogC
   }
   if (fb?.findExactTransfer) {
     chain.findExactTransfer = (accepted, payload) => (fb.findExactTransfer as NonNullable<LogChain["findExactTransfer"]>).call(fb, accepted, payload);
+  }
+  if (fb?.authorizationUsed) {
+    chain.authorizationUsed = (accepted, payload) => (fb.authorizationUsed as NonNullable<LogChain["authorizationUsed"]>).call(fb, accepted, payload);
+  }
+  if (fb?.authorizationCanceled) {
+    chain.authorizationCanceled = (accepted, payload) => (fb.authorizationCanceled as NonNullable<LogChain["authorizationCanceled"]>).call(fb, accepted, payload);
   }
   return chain;
 }

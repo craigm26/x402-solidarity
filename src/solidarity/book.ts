@@ -5,10 +5,10 @@
  * mode), which publish exactly the same things (https://craigmerry.com/solidarity-levy/spec/attestation.md).
  */
 
-import type { Batch, SigningKey } from "./ledger.ts";
-import { buildBatch, buildReceipt, decodeStatement, fileBody, jwsVerify, settlementsMatchTotals, signStatement, statementBytes, statementHash, statementPayload } from "./ledger.ts";
+import type { Batch, KeyResolver, SigningKey } from "./ledger.ts";
+import { buildBatch, buildReceipt, decodeStatement, fileBody, finalPeriod, isRetired, jwsDecode, jwsVerify, settlementsMatchTotals, signStatement, statementBytes, statementHash, statementPayload } from "./ledger.ts";
 import type { JwsEnvelope, LogDescriptor, PublishedStatement, Receipt, StatementPayload } from "./types.ts";
-import { nextPeriod, periodStart } from "./utils.ts";
+import { nextPeriod } from "./utils.ts";
 
 export interface ClosedPeriod {
   payload: StatementPayload;
@@ -20,21 +20,48 @@ export interface ClosedPeriod {
 
 export type ProofResult = [number, unknown];
 
+export interface LogBookOptions {
+  /**
+   * Stores a newly signed statement durably. A log issues one payload per
+   * period, ever, and stores it (or every input that determines it, `issuedAt`
+   * included) before it publishes it or sends it to a witness or the fund
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements"). Called in `close` before the period is
+   * closed and served; if it throws, the period stays open and nothing is
+   * published. Not called for a statement re-added from storage (`signed`).
+   */
+  persist?: (closed: { period: string; payload: StatementPayload; statement: JwsEnvelope }) => void;
+  /** Unix seconds: `issuedAt` when `close` is given none, the time of that first write. Default: the system clock. */
+  clock?: () => number;
+}
+
+/** What `retire` checks on the final statement before it sets `until`. */
+export interface RetireOptions {
+  /** The cosigners the log expects on its final statement, each by its exact kid (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund"). */
+  requireCosigners?: string[];
+  /** Resolves each required cosigner's kid to its public key. */
+  resolveKey?: KeyResolver;
+}
+
 export class LogBook {
   readonly descriptor: LogDescriptor;
   private readonly key: SigningKey;
+  private readonly persist?: LogBookOptions["persist"];
+  private readonly clock: () => number;
   private readonly settlements = new Map<string, string[]>();
   private readonly closed = new Map<string, ClosedPeriod>();
   private last: { period: string; hash: string } | undefined;
   private earliest: string | undefined;
 
-  constructor(descriptor: LogDescriptor, key: SigningKey) {
+  constructor(descriptor: LogDescriptor, key: SigningKey, opts: LogBookOptions = {}) {
     this.descriptor = descriptor;
     this.key = key;
+    this.persist = opts.persist;
+    this.clock = opts.clock ?? (() => Math.floor(Date.now() / 1000));
   }
 
   addSettlement(period: string, entry: string): void {
     if (this.closed.has(period)) throw new Error(`period ${period} is closed; a batch is never edited`);
+    this.refuseAfterFinal(period);
     const list = this.settlements.get(period) ?? [];
     list.push(entry);
     this.settlements.set(period, list);
@@ -49,7 +76,14 @@ export class LogBook {
    */
   markActive(period: string): void {
     if (this.closed.has(period)) throw new Error(`period ${period} is closed; a batch is never edited`);
+    this.refuseAfterFinal(period);
     if (!this.last && (this.earliest === undefined || period < this.earliest)) this.earliest = period;
+  }
+
+  /** A retired log issues no statement after its final one, so nothing can be recorded for a later period. */
+  private refuseAfterFinal(period: string): void {
+    const final = this.finalPeriod;
+    if (final !== undefined && period > final) throw new Error(`the log has retired: its final statement is for ${final}, and nothing is recorded for ${period}`);
   }
 
   get lastClosed(): { period: string; hash: string } | undefined {
@@ -76,9 +110,16 @@ export class LogBook {
    * (same kid, valid signature) and over exactly these payload bytes; anything
    * else throws before the period is closed. The private key is not used, and
    * the published statement is byte for byte the one stored.
+   *
+   * A log issues one payload per period, ever
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements"). Without `signed`, the new statement goes
+   * to `persist` before the period is closed and served, and `issuedAt`
+   * defaults to the clock: the time of that first write. With `signed` and no
+   * `issuedAt`, the stored statement's own `issuedAt` is used.
    */
   close(period: string, lines: string[], issuedAt?: number, signed?: JwsEnvelope): PublishedStatement {
     if (this.closed.has(period)) throw new Error(`${period} is already closed`);
+    if (this.retired) throw new Error(`the log has retired: its final statement is for ${this.finalPeriod}, and it issues none after it`);
     if (this.last && period !== nextPeriod(this.last.period)) throw new Error(`the next statement must be for ${nextPeriod(this.last.period)}`);
     if (!this.last && this.earliest !== undefined && period > this.earliest) throw new Error(`the first statement must be for ${this.earliest} or earlier`);
     const batch = buildBatch(lines);
@@ -93,9 +134,10 @@ export class LogBook {
       batch,
       settlementsBody,
       previous: this.last?.hash ?? null,
-      issuedAt: issuedAt ?? periodStart(nextPeriod(period)),
+      issuedAt: issuedAt ?? (signed ? storedIssuedAt(signed) : undefined) ?? this.clock(),
     });
     const pub = signed ? this.storedStatement(payload, signed) : signStatement(payload, this.key);
+    if (!signed) this.persist?.({ period, payload, statement: pub.statement });
     this.closed.set(period, { payload, pub, batch, lines: linesBody, settlements: settlementsBody });
     this.last = { period, hash: statementHash(payload) };
     return pub;
@@ -109,6 +151,51 @@ export class LogBook {
     if (!jwsVerify(signed.signature, this.key.publicKey)) throw new Error("the stored statement's signature does not verify with the log's key");
     if (Buffer.compare(Buffer.from(d.bytes), Buffer.from(statementBytes(payload))) !== 0) throw new Error("the stored statement is over another payload");
     return { statement: { format: "jws", signature: signed.signature }, cosignatures: [] };
+  }
+
+  /** Has the log retired (its descriptor lists no current key)? It then closes no more periods. */
+  get retired(): boolean {
+    return isRetired(this.descriptor);
+  }
+
+  /** The final period of a retired log. */
+  get finalPeriod(): string | undefined {
+    return finalPeriod(this.descriptor);
+  }
+
+  /**
+   * Step 3 of retiring (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"): set `until` on the current key to
+   * the last closed period, whose statement becomes the final one. Witnesses
+   * check the key while it is current, so `until` is set only once the
+   * cosignatures the log expects are attached: each kid in
+   * `requireCosigners` must have a valid cosignature on the final statement,
+   * checked with `resolveKey`. The callers (SolidarityLog.retire,
+   * ProcessorHolder.retire) check steps 1 and 2 first. After it the
+   * descriptor has no current key, and `close` refuses every period.
+   */
+  retire(opts: RetireOptions = {}): string {
+    if (this.retired) throw new Error("the log has already retired");
+    if (!this.last) throw new Error("a log retires with a final statement, and it has published none");
+    const current = this.descriptor.keys.filter((k) => k.until === null);
+    if (current.length !== 1 || current[0].kid !== this.key.kid) throw new Error("the descriptor's current key is not the key this log signs with");
+    if (current[0].from > this.last.period) throw new Error(`the current key signs from ${current[0].from}, after the last statement (${this.last.period})`);
+    const final = this.closed.get(this.last.period) as ClosedPeriod;
+    const bytes = decodeStatement(final.pub.statement).bytes;
+    for (const kid of opts.requireCosigners ?? []) {
+      const has = final.pub.cosignatures.some((c) => {
+        try {
+          const d = jwsDecode(c.signature);
+          if (d.header.kid !== kid || Buffer.compare(Buffer.from(d.payloadBytes), Buffer.from(bytes)) !== 0) return false;
+          const key = opts.resolveKey?.(kid, { log: this.descriptor.log, role: "cosigner" });
+          return key !== undefined && jwsVerify(c.signature, key);
+        } catch {
+          return false;
+        }
+      });
+      if (!has) throw new Error(`the final statement (${this.last.period}) has no valid cosignature by ${kid} yet`);
+    }
+    current[0].until = this.last.period;
+    return this.last.period;
   }
 
   addCosignature(period: string, cosignature: JwsEnvelope): void {
@@ -158,5 +245,14 @@ export class LogBook {
     m = /^\/proofs\/([A-Za-z0-9_-]{22,128})$/.exec(path);
     if (m) return json(...proof(m[1]));
     return json(404, { error: "not found" });
+  }
+}
+
+/** The `issuedAt` of a stored statement, or undefined if it cannot be read (the stored-statement check then says why). */
+function storedIssuedAt(signed: JwsEnvelope): number | undefined {
+  try {
+    return decodeStatement(signed).payload.issuedAt;
+  } catch {
+    return undefined;
   }
 }

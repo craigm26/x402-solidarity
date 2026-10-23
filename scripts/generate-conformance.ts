@@ -263,7 +263,7 @@ export async function runCases() {
   // 17. escrow flow: never a share.
   const escrow: PaymentRequirements = { ...exactReq("48000000"), scheme: "auth-capture" };
   const i17 = { ...(await w.share(w.p48)) };
-  const c17: Case = { name: "escrow", note: "auth-capture defaults to escrow; draft 2 has no shares on escrow flows.", paymentPayload: w.payloadWith(escrow, i17), requirements: escrow, settleResponse: ok(), expected: null, want: skip("purchase-not-supported") };
+  const c17: Case = { name: "escrow", note: "auth-capture defaults to escrow; draft 3 has no shares on escrow flows.", paymentPayload: w.payloadWith(escrow, i17), requirements: escrow, settleResponse: ok(), expected: null, want: skip("purchase-not-supported") };
   cases.push(c17);
   await run(c17);
 
@@ -683,7 +683,7 @@ export async function generate(): Promise<Record<string, string>> {
     settlementsSha256: S.sha256Hex(dec.settlements),
   });
   files["statements.json"] = json({
-    note: "Three chained monthly statements. 2026-10 and 2026-11 are the spec's draft 2 vectors; 2026-12 is the batch from payloads.json. Each is cosigned by the witness (TEST 2); 2026-12 is also cosigned by fund 0x...f00d (TEST 3), whose cosignature attests its settlement references in the simulated chain.",
+    note: "Three chained monthly statements. 2026-10 and 2026-11 are the spec's vectors (unchanged since draft 2); 2026-12 is the batch from payloads.json. Each is cosigned by the witness (TEST 2); 2026-12 is also cosigned by fund 0x...f00d (TEST 3), whose cosignature attests its settlement references in the simulated chain.",
     descriptor: DESCRIPTOR,
     keys: {
       log: { kid: TEST_KEYS.log.kid, publicKeyHex: S.ed25519PublicKeyHex(w.keys.logKey.publicKey), rfc8032: TEST_KEYS.log.rfc8032 },

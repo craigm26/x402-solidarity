@@ -211,8 +211,11 @@ test("a share receipt that never comes: queued while it is asked again, until va
     assert.ok(seen.every((x) => x === "queued"), seen.join());
     assert.equal(w.fundBalance(), SHARE, "the transfer did execute; only its receipt never came");
     const status = JSON.parse(w.log.handle(`/proofs/${r.outcome.id}`).body).status;
-    // Past the bound only findExactTransfer (an RPC client reading events) can still find it.
-    assert.equal(status, withFinder ? "queued" : "uncollected");
+    // Draft 3: a transfer reported as not made is not an uncollected share. Past the bound only
+    // findExactTransfer (an RPC client reading events) can still find it and collect the share;
+    // without it the share stays queued (draft 2 code reported this executed share uncollected).
+    assert.equal(status, "queued");
+    assert.equal(w.log.inspect(r.outcome.id)?.state, withFinder ? "collected" : "queued");
   }
 });
 

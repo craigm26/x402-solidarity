@@ -24,7 +24,8 @@ import type { ExactEip3009Payload, LogChain, PaymentRequirements, VoucherFields 
  * - cosign: the demo witness's or the demo fund's cosignature, stored and re-added on replay
  * - fund-check: what the demo fund read on chain about one settlement transaction
  * - fund-refused: the demo fund did not cosign a month, and why
- * - witness-refused: the demo witness refused a month; the log stops for good (replay keeps it stopped)
+ * - witness-refused: the demo witness refused a month, and why; the statement stays as it is and the log goes on
+ * - retire: the log retired after END_DATE, with its final statement's period
  */
 export type Kind =
   | "genesis"
@@ -39,7 +40,8 @@ export type Kind =
   | "cosign"
   | "fund-check"
   | "fund-refused"
-  | "witness-refused";
+  | "witness-refused"
+  | "retire";
 
 // Bodies are JSON with bigints as decimal strings, so `any` is the honest type here.
 export type Body = any;
@@ -93,10 +95,26 @@ export interface Store {
 /** JSON with bigints as decimal strings. */
 export const toJson = (v: unknown): string => JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x));
 
-/** What a submission came to, once final. */
+/**
+ * What a submission came to, once final. A failure says whether the chain
+ * showed the authorization used (`used`: by a transfer that is not the one
+ * signed) or unused after its validBefore. Rows written before draft 3 have no
+ * `used`, and some have `via: "engine"` (a share that was never sent).
+ */
 export type SubmitAnswer =
   | { ok: true; transaction: string; via: "facilitator" | "chain" }
-  | { ok: false; error: string; via: "facilitator" | "chain" | "engine" };
+  | { ok: false; error: string; via: "facilitator" | "chain" | "engine"; used?: boolean };
+
+/**
+ * EIP-3009 authorizationState as a recorded answer shows it: used, or unused after validBefore.
+ * A row from before draft 3 without `used` is read from its text, and one answered by the engine
+ * itself (never sent) is taken as unused, as the code that wrote it took it.
+ */
+export function usedOf(r: { ok: boolean; via?: string; error?: string; used?: unknown }): boolean {
+  if (r.ok) return true;
+  if (typeof r.used === "boolean") return r.used;
+  return r.via === "chain" && typeof r.error === "string" && r.error.startsWith("the authorization was used by ");
+}
 
 export interface LookupAnswer {
   found: { transaction: string; token: string; to: string; value: string } | null;
@@ -105,7 +123,12 @@ export interface LookupAnswer {
 
 /** What JournalChain needs from the engine. */
 export interface JournalBackend {
-  /** A recorded result or lookup body for this nonce (lowercase), if any. */
+  /**
+   * A recorded result or lookup body for this nonce (lowercase), if any. The
+   * engine moves the log's clock to that row's time: the log reads the clock
+   * after an answer (an exact share is uncollected only once its validBefore
+   * has passed), and every reading comes from the record.
+   */
   recorded(kind: "result" | "lookup", nonce: string): Body | undefined;
   /** Live only: submit write-ahead, wait for a final answer, record it, return it. */
   submitShare(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<SubmitAnswer>;
@@ -114,14 +137,20 @@ export interface JournalBackend {
 }
 
 /**
- * The LogChain handed to SolidarityLog. It has submitExact and
- * findExactTransfer, journaled by nonce. It deliberately has no verifyExact:
- * with one, the log's check would take another path. channelState is always
- * undefined and claim always fails, since this log lists only `exact`.
+ * The LogChain handed to SolidarityLog. It has submitExact,
+ * findExactTransfer and authorizationUsed, journaled by nonce. It deliberately
+ * has no verifyExact: with one, the log's check would take another path.
+ * channelState is always undefined and claim always fails, since this log
+ * lists only `exact`.
+ *
+ * authorizationUsed makes no chain call of its own: the log asks only after a
+ * failed submission, whose recorded answer is final (the engine waits for the
+ * chain to show the authorization used, or unused after validBefore) and says
+ * which.
  *
  * replay: answers come only from recorded rows. A missing answer is a
- *   divergence and throws; the log then marks the share uncollected, and the
- *   engine's comparison with the recorded cycle-end catches it.
+ *   divergence and throws; the share then stays queued, and the engine's
+ *   comparison with the recorded cycle-end catches it.
  * live: a recorded answer still comes first. Otherwise the engine acts.
  *   Anything that goes wrong inside the engine (not an answer from the
  *   chain) is kept as `fault`, so the engine can stop before it records a
@@ -170,6 +199,16 @@ export class JournalChain implements LogChain {
       }
     }
     return r.found ? { ...r.found, value: BigInt(r.found.value) } : undefined;
+  }
+
+  async authorizationUsed(_accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean> {
+    const nonce = payload.authorization.nonce.toLowerCase();
+    const r = this.backend.recorded("result", nonce);
+    if (r) return usedOf(r);
+    const why = `no recorded submission to read authorizationState from for share nonce ${nonce}`;
+    if (this.mode === "replay") this.divergence.push(`replay: ${why}`);
+    else this.fault ??= new Error(why);
+    throw new Error(why);
   }
 
   channelState(_channelId: string): undefined {

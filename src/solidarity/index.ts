@@ -1,5 +1,5 @@
 /**
- * Solidarity extension for x402 v2, draft 2: reference implementation.
+ * Solidarity extension for x402 v2, draft 3: reference implementation.
  *
  * A proposal, not part of x402, and not reviewed or endorsed by its
  * maintainers. The owner of an AI agent gives a small, fixed share of what the
@@ -42,12 +42,18 @@
  * ```ts
  * import { SolidarityLog } from "./solidarity/index.ts";
  *
- * const log = new SolidarityLog({ descriptor, key, chain });
+ * // persistStatement stores each statement before it is published (attestation.md, "Statements")
+ * const log = new SolidarityLog({ descriptor, key, chain, persistStatement });
  * const verifyResponse = log.onVerify(paymentPayload, await verifyPurchase());   // unchanged
  * const settled = await settlePurchase();
  * const { settleResponse, extensionResponses, followUp } = await log.onSettled(paymentPayload, requirements, settled);
  * // send settleResponse; set EXTENSION-RESPONSES for the seller if you like; then:
  * await followUp;
+ * // from a timer: exact shares whose transfer is not final yet, and late executions
+ * await log.reconcileExact();
+ * // each month, after it ends:
+ * await log.closePeriod("2026-10");
+ * // to stop for good: stopAccepting(), resolve and close, then retire() once the final statement is cosigned
  * ```
  */
 
@@ -145,7 +151,7 @@ export { isSolidarityExtension, validateSolidarity, validateOutcome, extractSoli
 export type { LogChain, SettledResult, SolidarityLogOptions } from "./facilitator.ts";
 export { SolidarityLog, purchaseBasis, withOutcome, decodeExtensionResponses } from "./facilitator.ts";
 
-export type { SigningKey, KeyResolver, VerifyOptions, FundView, StatementCheck, ReceiptCheck, Batch } from "./ledger.ts";
+export type { SigningKey, KeyResolver, VerifyOptions, FundView, FundRecord, StatementCheck, ReceiptCheck, Batch, WitnessOptions, WitnessRecordEntry } from "./ledger.ts";
 export {
   formatLine,
   parseLine,
@@ -177,14 +183,20 @@ export {
   keyCoversPeriod,
   listedKey,
   firstPeriod,
+  isRetired,
+  finalPeriod,
   publicKeyFromJwk,
   publicJwk,
   didWebHost,
-  kidOnLogHost,
+  kidDid,
+  didWebOfHost,
+  didWebAuthorizesLogKey,
+  logKeyAuthorizer,
   sha256Hex,
   Witness,
   FundCosigner,
 } from "./ledger.ts";
 
+export type { LogBookOptions, RetireOptions } from "./book.ts";
 export { LogBook } from "./book.ts";
 export { ProcessorHolder } from "./processor.ts";

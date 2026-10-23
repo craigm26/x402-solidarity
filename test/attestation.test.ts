@@ -24,6 +24,8 @@ const witnessKey = S.generateSigningKey("EdDSA", "did:web:witness.example#1");
 const attackerKey = S.generateSigningKey("EdDSA", "did:web:attacker.example#1");
 const resolveKey = S.staticResolver({ [logKey.kid]: logKey.publicKey, [fundKey.kid]: fundKey.publicKey, [witnessKey.kid]: witnessKey.publicKey, [attackerKey.kid]: attackerKey.publicKey });
 const descriptor = { log: LOG, keys: [{ kid: logKey.kid, from: "2026-01", until: null }] };
+/** What a witness with no record for the log needs to check its first statement: here, 2026-10. */
+const fromOctober = { log: LOG, keys: [{ kid: logKey.kid, from: "2026-10", until: null }] };
 const shareId = (n: number) => `attestation-share-${String(n).padStart(4, "0")}`;
 const line = (n: number, amount: string, period = "2026-10") => S.formatLine({ period, fund: FUND, asset: USDC, id: shareId(n), amount });
 const entry = (ref: string, amount: string | bigint) => S.formatSettlement({ fund: FUND, asset: USDC, ref, amount });
@@ -65,7 +67,7 @@ test("the same transfer listed twice in one file is refused everywhere: file par
   assert.throws(() => S.parseFileBody(twice), /repeated/);
   assert.throws(() => fundOf(w).cosign(pub, twice, { resolveKey }), /repeated/);
   const lines = S.fileBody([line(1, "48000"), line(2, "48000")]);
-  assert.throws(() => new S.Witness(witnessKey).cosign(pub, { resolveKey, files: { lines, settlements: twice } }), /repeated/);
+  assert.throws(() => new S.Witness(witnessKey).cosign(pub, { resolveKey, descriptor: fromOctober, files: { lines, settlements: twice } }), /repeated/);
   const book = new S.LogBook({ version: 2, log: LOG, funds: [FUND], keys: descriptor.keys }, logKey);
   book.addSettlement("2026-10", e);
   book.addSettlement("2026-10", e);
@@ -161,12 +163,13 @@ test("a witness that checks the files refuses a wrong settlements file, sums tha
   const good = statement([line(1, "48000")], settlements);
   const lines = S.fileBody([line(1, "48000")]);
   const other = body([entry(`exact:${w.toFund2}`, 48000n)]);
-  assert.throws(() => new S.Witness(witnessKey).cosign(good.pub, { resolveKey, files: { lines, settlements: other } }), /hash differs/);
+  const descriptor = fromOctober;
+  assert.throws(() => new S.Witness(witnessKey).cosign(good.pub, { resolveKey, descriptor, files: { lines, settlements: other } }), /hash differs/);
   const short = statement([line(1, "48000"), line(2, "48000")], settlements);
-  assert.throws(() => new S.Witness(witnessKey).cosign(short.pub, { resolveKey, files: { lines: S.fileBody([line(1, "48000"), line(2, "48000")]), settlements } }), /add up/);
+  assert.throws(() => new S.Witness(witnessKey).cosign(short.pub, { resolveKey, descriptor, files: { lines: S.fileBody([line(1, "48000"), line(2, "48000")]), settlements } }), /add up/);
   const sept = statement([line(3, "48000", "2026-09")], settlements, { period: "2026-10" });
-  assert.throws(() => new S.Witness(witnessKey).cosign(sept.pub, { resolveKey, files: { lines: S.fileBody([line(3, "48000", "2026-09")]), settlements } }), /another period/);
-  new S.Witness(witnessKey).cosign(good.pub, { resolveKey, files: { lines, settlements } });
+  assert.throws(() => new S.Witness(witnessKey).cosign(sept.pub, { resolveKey, descriptor, files: { lines: S.fileBody([line(3, "48000", "2026-09")]), settlements } }), /another period/);
+  new S.Witness(witnessKey).cosign(good.pub, { resolveKey, descriptor, files: { lines, settlements } });
 });
 
 // ---- owners' receipts and the chain -----------------------------------------------------------
@@ -209,8 +212,8 @@ test("a statement key must belong to the log's host, with or without a descripto
   // A verifier that has checked the DNS route itself can say so.
   assert.equal(S.verifyStatement(forged.pub, { resolveKey, authorizeLogKey: () => true }).ok, true);
   assert.equal(S.didWebHost("did:web:log.example%3A8443:solidarity#k"), "log.example:8443");
-  assert.ok(S.kidOnLogHost("did:web:log.example#1", LOG));
-  assert.ok(!S.kidOnLogHost("did:web:log.example.attacker.example#1", LOG));
+  assert.ok(S.didWebAuthorizesLogKey("did:web:log.example#1", LOG));
+  assert.ok(!S.didWebAuthorizesLogKey("did:web:log.example.attacker.example#1", LOG));
 });
 
 test("JWS alg is tied to the key type", () => {

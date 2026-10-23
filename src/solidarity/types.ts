@@ -1,7 +1,7 @@
 /**
- * Type definitions and constants for the solidarity extension, draft 2.
+ * Type definitions and constants for the solidarity extension, draft 3.
  *
- * Source of truth: the draft 2 spec (2026-10-22), three documents:
+ * Source of truth: the draft 3 spec (2026-10-23), three documents:
  * - https://craigmerry.com/solidarity-levy/spec/solidarity.md (the x402 extension),
  * - https://craigmerry.com/solidarity-levy/spec/attestation.md (the receipt attestation contract, normative for logs),
  * - https://craigmerry.com/solidarity-levy/spec/processor-mode.md (informative).
@@ -200,7 +200,9 @@ export interface PublicJwk {
  * One statement key a log has used (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Signatures and keys"): its public key,
  * and the first and last period it signed (`until` is null for the current
  * key). DID documents and DNS show only current state, so a retired key's
- * public key is known only from here.
+ * public key is known only from here. A descriptor with no current key
+ * belongs to a retired log, whose final period is the latest `until`
+ * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log").
  */
 export interface DescriptorKey {
   kid: string;

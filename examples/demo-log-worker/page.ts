@@ -52,7 +52,7 @@ function statementBlock(s: Snapshot, st: StatementView): string {
   <dt>Root</dt><dd><code>${esc(st.root)}</code></dd>
   <dt>Issued</dt><dd>${esc(iso(st.issuedAt))}</dd>
   <dt>Previous</dt><dd>${st.previous ? `<code>${esc(st.previous)}</code>` : "none: this is the log's first month"}</dd>
-  <dt>Witness</dt><dd>${st.witness ? "the demo witness cosigned it" : "not yet cosigned by the demo witness"}</dd>
+  <dt>Witness</dt><dd>${st.witness ? "the demo witness cosigned it" : st.witnessRefused ? `<strong>the demo witness refused it:</strong> ${esc(st.witnessRefused)}. The statement stays as it is; a verifier that requires the witness rejects it and its receipts, and the log goes on.` : "not yet cosigned by the demo witness"}</dd>
   <dt>Fund</dt><dd>${fund}</dd>
 </dl>
 <p><a href="/solidarity/statements/${esc(st.period)}">statement</a> · <a href="/solidarity/lines/${esc(st.period)}">lines</a> · <a href="/solidarity/settlements/${esc(st.period)}">settlements</a></p>`;
@@ -60,16 +60,13 @@ function statementBlock(s: Snapshot, st: StatementView): string {
 
 export function renderPage(s: Snapshot): string {
   const sim = s.mode === "sim";
-  const state =
-    s.state === "degraded"
-      ? `<p class="warn"><strong>Stopped.</strong> The log found a problem in its own records or settings and serves nothing until its operator looks: ${esc(s.degraded)}</p>`
-      : s.state === "paused"
-        ? `<p class="warn"><strong>Paused.</strong> No new purchases start. Recorded work (an unfinished purchase, a month close) still finishes.</p>`
-        : s.state === "ended"
-          ? `<p><strong>Ended.</strong> No purchases start after ${esc(s.endDate)}. Months still close while the Worker exists.</p>`
-          : s.state === "waiting"
-            ? `<p class="warn"><strong>No purchases.</strong> The last tick, at ${esc(iso(s.lastTick?.at))}, started no purchase: ${esc(s.waiting)}. Each tick, every 6 hours, checks again. Recorded work (an unfinished purchase, a month close) still finishes.</p>`
-            : `<p><strong>Running.</strong> A purchase every 6 hours until ${esc(s.endDate)}.</p>`;
+  let state: string;
+  if (s.state === "degraded") state = `<p class="warn"><strong>Stopped.</strong> The log found a problem in its own records or settings and serves nothing until its operator looks: ${esc(s.degraded)}</p>`;
+  else if (s.state === "retired") state = `<p><strong>Retired.</strong> No purchases started after ${esc(s.endDate)}, and the log has retired: its statement for ${esc(s.finalPeriod)} is its final one, its descriptor lists no current key, and it closes no more months. Everything it published is still served.</p>`;
+  else if (s.state === "paused") state = `<p class="warn"><strong>Paused.</strong> No new purchases start. Recorded work (an unfinished purchase, a month close) still finishes.</p>`;
+  else if (s.state === "ended") state = `<p><strong>Ended.</strong> No purchases start after ${esc(s.endDate)}. The log retires once its last month with a share is closed and cosigned.</p>`;
+  else if (s.state === "waiting") state = `<p class="warn"><strong>No purchases.</strong> The last tick, at ${esc(iso(s.lastTick?.at))}, started no purchase: ${esc(s.waiting)}. Each tick, every 6 hours, checks again. Recorded work (an unfinished purchase, a month close) still finishes.</p>`;
+  else state = `<p><strong>Running.</strong> A purchase every 6 hours until ${esc(s.endDate)}.</p>`;
   const latest = s.statements[0];
   const period = latest?.period ?? s.keyFrom ?? "2026-10";
   const exampleId = s.cycles[0]?.share.id ?? "<id>";
@@ -103,7 +100,7 @@ ul { padding-left: 1.2rem; }
 <body>
 <main>
 <h1>Solidarity demo log</h1>
-<p>A working demo of a <em>solidarity log</em> from the draft 2 solidarity proposal for x402: an agent's owner gives a small, fixed share of what the agent spends to a fund, each share becomes a line in a public log, and each month the log publishes a signed statement that a witness and the fund cosign. It is a proposal, not part of x402, and not affiliated with or endorsed by anyone. It was written with AI assistance.</p>
+<p>A working demo of a <em>solidarity log</em> from the draft 3 solidarity proposal for x402: an agent's owner gives a small, fixed share of what the agent spends to a fund, each share becomes a line in a public log, and each month the log publishes a signed statement that a witness and the fund cosign. It is a proposal, not part of x402, and not affiliated with or endorsed by anyone. It was written with AI assistance.</p>
 ${state}
 
 <h2>What is real</h2>
@@ -125,7 +122,7 @@ ${real}
   <dt>Last tick</dt><dd>${lastTick}</dd>
   ${s.unfinished !== null ? `<dt>Unfinished</dt><dd>purchase ${s.unfinished} is still being settled; it resumes on the next tick or alarm</dd>` : ""}
   ${s.backoffUntil ? `<dt>Waiting</dt><dd>3 purchases in a row failed; the next one starts after ${esc(iso(s.backoffUntil))}</dd>` : ""}
-  <dt>Next close</dt><dd>${esc(iso(s.nextClose))} (the month before is closed on the first tick after it)</dd>
+  ${s.finalPeriod ? `<dt>Final statement</dt><dd>${esc(s.finalPeriod)}</dd>` : `<dt>Next close</dt><dd>${esc(iso(s.nextClose))} (the month before is closed on the first tick after it)</dd>`}
   <dt>Log key</dt><dd>Ed25519 <code>${esc(s.logKeyHex ?? "")}</code>, <code>${esc(s.kids?.log ?? "")}</code></dd>
 </dl>
 

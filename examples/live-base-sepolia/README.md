@@ -36,4 +36,6 @@ The share's payment is an ordinary x402 `exact` payment whose `payTo` is the fun
 
 If the log's own submission of the share fails, it asks the chain whether anyone else already executed that authorization (`findTransfer.ts`): it checks `authorizationState`, finds USDC's `AuthorizationUsed` event for the payer and nonce in the last 2,000 blocks (in 200-block requests, the public endpoint's limit), and reads the `Transfer` the same call emitted. If that paid the fund the share's amount, the share counts as collected with that transaction. `test/live.test.ts` checks this against the share from the 2026-10-22 run.
 
+A failed submission alone never makes the share uncollected (draft 3, solidarity.md, "Share kinds"). The log reports it uncollected only once its `validBefore` has passed and the chain shows the authorization unused (`authorizationState`) or cancelled (USDC's `AuthorizationCanceled` event, searched in the same window). This script exits right after the follow-up, before that, so a failed share shows as `queued`.
+
 USDC on Base Sepolia is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, EIP-712 domain name `USDC`, version `2`, as listed in the x402 repository (`typescript/packages/mechanisms/evm/src/defaultAssets.ts`). Only `exact` shares are wired up here; `batch-settlement` channels and claims are not.

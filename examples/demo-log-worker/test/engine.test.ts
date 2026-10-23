@@ -290,15 +290,39 @@ test("stop conditions are checked before anything is signed", async (t) => {
     assert.equal(r.store.events().filter((x) => x.kind === "cycle").length, 0);
   });
 
-  await t.test("after END_DATE: no purchase, but the last month still closes", async () => {
+  await t.test("after END_DATE: no purchase; the last month closes, and the log retires with it as its final statement", async () => {
     const r = await rig({ start: at("2026-10-31T00:00:00Z"), config: { endDate: "2026-10-31" } });
     const a = await tickAfter(r, 6 * HOUR);
     assert.ok(collected(a.cycle), "on END_DATE itself it still runs");
     await runUntil(r, at("2026-10-31T18:00:00Z"));
     const b = await tickAfter(r, 6 * HOUR);
-    assert.match(b.cycle?.stop ?? "", /ended: END_DATE 2026-10-31 has passed/);
-    assert.ok(b.maintained.includes("closed 2026-10"));
-    assert.equal(r.engine.snapshot().state, "ended");
+    assert.deepEqual(b.maintained, ["closed 2026-10", "retired: the final statement is for 2026-10"]);
+    assert.match(b.cycle?.stop ?? "", /^retired: the log's final statement is for 2026-10$/);
+    assert.ok(r.store.get("cosign", "2026-10:witness") && r.store.get("cosign", "2026-10:fund"), "retired only once both cosignatures were attached");
+    assert.deepEqual(r.store.get("retire", "2026-10")?.body, { period: "2026-10" });
+    const descriptor = JSON.parse(r.engine.serve("").body);
+    assert.equal(descriptor.keys[0].until, "2026-10");
+    assert.equal(S.finalPeriod(descriptor), "2026-10");
+    const snap = r.engine.snapshot();
+    assert.deepEqual([snap.state, snap.finalPeriod], ["retired", "2026-10"]);
+    assert.match(renderPage(snap), /Retired\./);
+    // Its statement now verifies with the retired key's JWK and a required cosignature; receipts too.
+    const resolveKey = S.staticResolver({ [snap.kids?.witness as string]: (r.engine.keys as NonNullable<typeof r.engine.keys>).witness.publicKey });
+    const oct = JSON.parse(r.engine.serve("/statements/2026-10").body);
+    assert.ok(S.verifyStatement(oct, { resolveKey, descriptor, requireCosigners: [snap.kids?.witness as string] }).ok);
+    assert.deepEqual(S.verifyChain([oct], { complete: descriptor }), { ok: true, problems: [] });
+    // A restart replays the retirement; a month later nothing closes, and everything is still served.
+    const before = published(r);
+    const r2 = await restart(r);
+    assert.equal(r2.engine.degraded, undefined, r2.engine.degraded);
+    assert.equal(r2.blockedCalls, 0);
+    assert.deepEqual(published(r2), before);
+    r2.io.advance(31 * 86400);
+    const c = await r2.engine.tick();
+    assert.deepEqual(c.maintained, []);
+    assert.match(c.cycle?.stop ?? "", /^retired/);
+    assert.equal(r2.store.get("close-intent", "2026-11"), undefined);
+    assert.equal(r2.engine.serve("/statements/2026-10").status, 200);
     assert.equal(endBoundary("2027-02-30"), undefined);
     const bad = await rig({ config: { endDate: "2027-02-30" } });
     assert.match((await tickAfter(bad, HOUR)).cycle?.stop ?? "", /END_DATE 2027-02-30 is not a YYYY-MM-DD date/);
@@ -467,7 +491,7 @@ test("tampered records or changed variables stop the log instead of rewriting it
   });
 });
 
-test("a refusal by the demo witness stops the log for good: no fund cosignature, no later close, across a restart", async (t) => {
+test("a refusal by the demo witness stands, and the log goes on: the statement stays as it is, later months chain through it", async (t) => {
   await t.test("the witness refuses October", async () => {
     const orig = S.Witness.prototype.cosign;
     S.Witness.prototype.cosign = function (this: S.Witness, pub: PublishedStatement, ...rest: unknown[]) {
@@ -479,25 +503,30 @@ test("a refusal by the demo witness stops the log for good: no fund cosignature,
       await runUntil(r, at("2026-10-31T18:00:00Z"));
       const t1 = await tickAfter(r, 6 * HOUR); // 2026-11-01T00:00Z closes October
       assert.ok(t1.maintained.includes("closed 2026-10"));
-      assert.match(r.engine.degraded ?? "", /^the demo witness refuses 2026-10: witness refuses: test refusal of October$/);
-      assert.equal(r.store.get("witness-refused", "2026-10")?.body.reason, "witness refuses: test refusal of October");
+      assert.equal(r.engine.degraded, undefined);
+      const refused = r.store.get("witness-refused", "2026-10")?.body;
+      assert.equal(refused?.reason, "witness refuses: test refusal of October");
+      assert.equal(refused?.payloadHash, S.statementHash(S.decodeStatement(JSON.parse(r.engine.serve("/statements/2026-10").body).statement).payload));
       assert.equal(r.store.get("cosign", "2026-10:witness"), undefined);
-      assert.equal(r.store.get("cosign", "2026-10:fund"), undefined, "the fund never cosigns a month the witness refused");
-      assert.match(t1.cycle?.stop ?? "", /degraded/);
-      // A restart keeps it stopped.
+      assert.ok(r.store.get("cosign", "2026-10:fund"), "the fund checks on its own");
+      assert.ok(collected(t1.cycle), "the log goes on");
+      assert.match(renderPage(r.engine.snapshot()), /the demo witness refused it:<\/strong> witness refuses: test refusal of October/);
+      // A restart keeps the refusal and the statement as they are.
       const r2 = await restart(r);
-      assert.match(r2.engine.degraded ?? "", /^the demo witness refuses 2026-10/);
-      assert.equal(r2.engine.serve("/statements/2026-10").status, 503);
-      assert.match(renderPage(r2.engine.snapshot()), /Stopped\./);
-      // And November is never closed or cosigned.
-      r2.io.advance(30 * 86400);
-      const t2 = await r2.engine.tick();
-      assert.match(t2.stop ?? "", /degraded: the demo witness refuses 2026-10/);
-      assert.deepEqual(t2.maintained, []);
-      assert.deepEqual(await r2.engine.maintain(), []);
-      for (const k of ["close-intent", "close"] as const) assert.equal(r2.store.get(k, "2026-11"), undefined);
-      assert.equal(r2.store.events().filter((e) => e.kind === "cosign").length, 0);
-      assert.equal(r2.store.events().filter((e) => e.kind === "cycle" && e.at > at("2026-11-01T00:00:00Z")).length, 0);
+      assert.equal(r2.engine.degraded, undefined, r2.engine.degraded);
+      const oct = JSON.parse(r2.engine.serve("/statements/2026-10").body) as PublishedStatement;
+      assert.equal(oct.cosignatures.length, 1, "the fund's only");
+      // November chains through the refused October, and the witness cosigns it; its refusal of October stands.
+      await runUntil(r2, at("2026-12-02T00:00:00Z")); // the fund reads at most 30 receipts a run
+      assert.equal(JSON.parse(r2.engine.serve("/statements/2026-11").body).cosignatures.length, 2);
+      assert.ok(r2.store.get("cosign", "2026-11:witness"));
+      assert.equal(r2.store.get("cosign", "2026-10:witness"), undefined);
+      const k = r2.engine.keys as NonNullable<typeof r2.engine.keys>;
+      const resolveKey = S.staticResolver({ [k.log.kid]: k.log.publicKey, [k.witness.kid]: k.witness.publicKey });
+      const nov = JSON.parse(r2.engine.serve("/statements/2026-11").body) as PublishedStatement;
+      assert.equal(S.verifyStatement(oct, { resolveKey, requireCosigners: [k.witness.kid] }).ok, false, "a verifier that requires the witness rejects October");
+      assert.equal(S.verifyStatement(nov, { resolveKey, requireCosigners: [k.witness.kid] }).ok, true);
+      assert.deepEqual(S.verifyChain([oct, nov]), { ok: true, problems: [] });
     } finally {
       S.Witness.prototype.cosign = orig;
     }
@@ -512,10 +541,15 @@ test("a refusal by the demo witness stops the log for good: no fund cosignature,
     r.io.advance(30 * 86400 - 6 * HOUR); // 2026-12-01T00:00Z
     const t1 = await r.engine.tick();
     assert.ok(t1.maintained.includes("closed 2026-11"));
-    assert.match(r.engine.degraded ?? "", /the demo witness refuses 2026-11: previous does not chain to the statement it cosigned for the month before/);
-    assert.ok(r.store.get("witness-refused", "2026-11"));
+    assert.equal(r.engine.degraded, undefined);
+    assert.match(r.store.get("witness-refused", "2026-11")?.body.reason, /witness refuses: previous does not chain to the last payload it cosigned/);
     assert.equal(r.store.get("cosign", "2026-11:witness"), undefined);
-    assert.equal(r.store.get("cosign", "2026-11:fund"), undefined);
+    assert.ok(r.store.get("cosign", "2026-11:fund"));
+    // December chains through November to the October it remembers wrongly, so it is refused too.
+    r.io.advance(31 * 86400);
+    const t2 = await r.engine.tick();
+    assert.ok(t2.maintained.includes("closed 2026-12"));
+    assert.match(r.store.get("witness-refused", "2026-12")?.body.reason, /witness refuses: history does not chain to the last cosigned payload/);
   });
 });
 

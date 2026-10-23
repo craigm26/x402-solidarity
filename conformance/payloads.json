@@ -3243,7 +3243,7 @@
     },
     {
       "name": "escrow",
-      "note": "auth-capture defaults to escrow; draft 2 has no shares on escrow flows.",
+      "note": "auth-capture defaults to escrow; draft 3 has no shares on escrow flows.",
       "paymentPayload": {
         "x402Version": 2,
         "accepted": {

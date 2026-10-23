@@ -435,7 +435,12 @@ export function decodeStatement(env: JwsEnvelope): { payload: StatementPayload; 
  */
 export type KeyResolver = (kid: string, context: { log: string; role: "log" | "cosigner" }) => KeyObject | undefined;
 
-/** The host a did:web DID URL names (`did:web:example.com%3A8443:path#key` gives `example.com:8443`), or undefined. */
+/**
+ * The host a did:web DID URL names, with or without a path
+ * (`did:web:example.com%3A8443:path#key` gives `example.com:8443`), or
+ * undefined. Descriptive only: a log key needs the root DID of the log's host
+ * (didWebAuthorizesLogKey), not just its host.
+ */
 export function didWebHost(kid: string): string | undefined {
   const m = /^did:web:([^:#?/]+)/.exec(kid);
   if (!m) return undefined;
@@ -446,19 +451,67 @@ export function didWebHost(kid: string): string | undefined {
   }
 }
 
+/** The DID in a DID URL: everything before its path, query or fragment (`did:web:example.com#key-1` gives `did:web:example.com`), or undefined. */
+export function kidDid(kid: string): string | undefined {
+  const m = /^did:[a-z0-9]+:[^/?#]+/.exec(kid);
+  return m ? m[0] : undefined;
+}
+
+/** The root did:web DID of a host: `did:web:<host>`, a port's colon written `%3A` as did:web requires. */
+export function didWebOfHost(host: string): string {
+  return `did:web:${host.toLowerCase().replace(/:([0-9]+)$/, "%3A$1")}`;
+}
+
 /**
- * The default check that a statement key belongs to the log ("Signatures and
- * keys"): a did:web key on the log URL's host. A verifier that also accepts
- * the DNS route (`_controllers.<host>`) passes its own `authorizeLogKey`.
+ * The did:web route for a log's statement key, and the default `authorizeLogKey`
+ * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Signatures and keys"): the DID in the `kid` is
+ * exactly `did:web:<host>` for the host of the log URL, whose document is
+ * `https://<host>/.well-known/did.json`. A DID with a path, `did:web:<host>:<path>`,
+ * never authorizes a log key, even on the log's host: a witness's or fund's key
+ * served next to the log, or anyone who can publish a file on the host, would
+ * otherwise pass as the log. Here the `kid` is that DID and a fragment, nothing
+ * else. That the root document lists the key is the key resolver's part, since
+ * it stands for the did:web lookup. A verifier that also accepts the DNS route
+ * (a `controller` in the TXT record at `_controllers.<host>`) passes its own
+ * `authorizeLogKey`, and can compare `kidDid(kid)` with those controllers.
  */
-export function kidOnLogHost(kid: string, log: string): boolean {
+export function didWebAuthorizesLogKey(kid: string, log: string): boolean {
   let host: string;
   try {
-    host = new URL(log).host.toLowerCase();
+    host = new URL(log).host;
   } catch {
     return false;
   }
-  return didWebHost(kid) === host;
+  const m = /^(did:web:[^/?#]+)(?:#[^#]*)?$/.exec(kid);
+  if (!m) return false;
+  // Compared case-insensitively: hosts and percent-encoding are. Any other spelling (a path,
+  // another percent-encoding) is not the root DID.
+  return m[1].toLowerCase() === didWebOfHost(host).toLowerCase();
+}
+
+/**
+ * An `authorizeLogKey` for both routes of
+ * https://craigmerry.com/solidarity-levy/spec/attestation.md, "Signatures and keys": the did:web route
+ * (didWebAuthorizesLogKey), or the DNS route, where the DID in the `kid` is
+ * exactly one of the `controller` values of the TXT record at
+ * `_controllers.<host>`. This library makes no DNS lookups: `dnsControllers`
+ * gets the log URL's host name (no port) and returns the controller values
+ * the verifier read from that record, or nothing. A path DID passes the DNS
+ * route only if the record names it.
+ */
+export function logKeyAuthorizer(opts: { dnsControllers?: (host: string) => readonly string[] | undefined } = {}): (kid: string, log: string) => boolean {
+  return (kid, log) => {
+    if (didWebAuthorizesLogKey(kid, log)) return true;
+    if (!opts.dnsControllers) return false;
+    let host: string;
+    try {
+      host = new URL(log).hostname.toLowerCase();
+    } catch {
+      return false;
+    }
+    const did = kidDid(kid);
+    return did !== undefined && (opts.dnsControllers(host) ?? []).includes(did);
+  };
 }
 
 /** What verifyStatement, verifyReceipt, Witness and FundCosigner take. */
@@ -467,7 +520,7 @@ export interface VerifyOptions {
   /** The log's descriptor: the statement must be for its log, by a key it lists for the period. */
   descriptor?: Pick<LogDescriptor, "keys" | "log">;
   requireCosigners?: string[];
-  /** Is `kid` authorized for `log`? Default: a did:web key on the log's host. */
+  /** Is `kid` authorized for `log`? Default: didWebAuthorizesLogKey, the root did:web DID of the log's host. */
   authorizeLogKey?: (kid: string, log: string) => boolean;
 }
 
@@ -488,6 +541,21 @@ export function listedKey(descriptor: Pick<LogDescriptor, "keys">, kid: string, 
 /** A log's first period: the `from` of the earliest key in its descriptor (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund", "Publication"). */
 export function firstPeriod(descriptor: Pick<LogDescriptor, "keys">): string | undefined {
   return descriptor.keys.map((k) => k.from).sort()[0];
+}
+
+/**
+ * Has the log retired? A descriptor with keys but no current one (no `until`
+ * that is null) belongs to a retired log
+ * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log").
+ */
+export function isRetired(descriptor: Pick<LogDescriptor, "keys">): boolean {
+  return descriptor.keys.length > 0 && descriptor.keys.every((k) => k.until !== null);
+}
+
+/** A retired log's final period: the latest `until` in its descriptor. Undefined while the log has a current key. */
+export function finalPeriod(descriptor: Pick<LogDescriptor, "keys">): string | undefined {
+  if (!isRetired(descriptor)) return undefined;
+  return descriptor.keys.map((k) => k.until as string).sort().at(-1);
 }
 
 /** A public key from a descriptor's JWK, or undefined if it is not a usable Ed25519 or P-256 key. */
@@ -527,6 +595,17 @@ export interface StatementCheck {
  * witnesses checked it while it was current.
  */
 export function verifyStatement(pub: PublishedStatement, opts: VerifyOptions): StatementCheck {
+  return checkStatement(pub, opts, true);
+}
+
+/**
+ * verifyStatement, except that with `retiredNeedsCosigner` false a key the
+ * descriptor lists as retired is taken from its `jwk` without a required
+ * cosignature. Only a witness walking a log's history back from a statement
+ * signed by the current key uses that: the chain of `previous` hashes is what
+ * it checks there, and the current statement commits to it.
+ */
+function checkStatement(pub: PublishedStatement, opts: VerifyOptions, retiredNeedsCosigner: boolean): StatementCheck {
   const problems: string[] = [];
   let d: ReturnType<typeof decodeStatement>;
   try {
@@ -542,8 +621,8 @@ export function verifyStatement(pub: PublishedStatement, opts: VerifyOptions): S
   }
   if (!retired) {
     // The current key must belong to the log the statement names, whether or not a descriptor is given.
-    if (!(opts.authorizeLogKey ?? kidOnLogHost)(d.kid, d.payload.log)) problems.push(`key ${d.kid} is not authorized for ${d.payload.log}`);
-  } else if (!opts.requireCosigners?.length) {
+    if (!(opts.authorizeLogKey ?? didWebAuthorizesLogKey)(d.kid, d.payload.log)) problems.push(`key ${d.kid} is not authorized for ${d.payload.log}`);
+  } else if (retiredNeedsCosigner && !opts.requireCosigners?.length) {
     problems.push(`key ${d.kid} is retired: it is accepted only with a cosignature the verifier requires`);
   }
   const logKey = (retired ? publicKeyFromJwk(listed?.jwk) : undefined) ?? opts.resolveKey(d.kid, { log: d.payload.log, role: "log" });
@@ -565,12 +644,33 @@ export function verifyStatement(pub: PublishedStatement, opts: VerifyOptions): S
   return { ok: problems.length === 0, payload: d.payload, hash: d.hash, problems, cosigners };
 }
 
-/** Statements chain by `previous` and cover consecutive periods (a gap is visible). Never throws. */
-export function verifyChain(pubs: PublishedStatement[]): { ok: boolean; problems: string[] } {
+/**
+ * Statements chain by `previous` and cover consecutive periods (a gap is
+ * visible). Never throws. The first statement given may be mid-chain, unless
+ * `complete` is the log's descriptor: then the list must be the whole log
+ * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Consistency between months"), from its first statement
+ * (`previous` null, for the `from` of its earliest key) and, if the log has
+ * retired, to its final one, with nothing after it.
+ */
+export function verifyChain(pubs: PublishedStatement[], opts: { complete?: Pick<LogDescriptor, "keys"> } = {}): { ok: boolean; problems: string[] } {
   const problems: string[] = [];
   let prev: { hash: string; period: string; log: string } | undefined;
   if (!Array.isArray(pubs)) return { ok: false, problems: ["not a list of statements"] };
-  // The first statement given may be mid-chain (its `previous` is not checked here).
+  if (opts.complete) {
+    const payloadAt = (i: number): Partial<StatementPayload> => {
+      try {
+        return decodeStatement(pubs[i]?.statement).payload;
+      } catch {
+        return {};
+      }
+    };
+    const first = firstPeriod(opts.complete);
+    const head = payloadAt(0);
+    if (pubs.length === 0) problems.push("no statements");
+    else if (head.period !== first || head.previous !== null) problems.push(`the log's first statement is for ${first}, with previous null`);
+    const end = finalPeriod(opts.complete);
+    if (end !== undefined && pubs.length > 0 && payloadAt(pubs.length - 1).period !== end) problems.push(`the log retired with ${end} as its final statement`);
+  }
   pubs.forEach((p, i) => {
     let d: ReturnType<typeof decodeStatement>;
     try {
@@ -644,20 +744,81 @@ export function verifyReceipt(receipt: Receipt, opts: VerifyOptions): ReceiptChe
 
 // ---- witnesses ---------------------------------------------------------------------------
 
+/** One entry of a witness's record: the hash of the payload it cosigned for one (log, period). */
+export interface WitnessRecordEntry {
+  log: string;
+  period: string;
+  hash: string;
+}
+
+export interface WitnessOptions {
+  /** Its record so far, read back from its own storage. Empty or absent for a witness that has never cosigned. */
+  record?: WitnessRecordEntry[];
+  /**
+   * Stores one new entry durably. Called before the cosignature is returned:
+   * if it throws, nothing is cosigned and the record in memory is unchanged.
+   */
+  persist?: (entry: WitnessRecordEntry) => void;
+}
+
 /**
- * A witness (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund"). Before cosigning it verifies the log's signature,
- * checks that `previous` equals the hash of the last payload it cosigned for
- * this log (or walks the chain back to it through `history`), and never
- * cosigns two different payloads for one (log, period). It may also recompute
- * root, size, totals and settlements from the published files.
+ * A witness (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund"). Before cosigning it verifies the log's
+ * signature, checks that `previous` is the hash of the payload for the period
+ * just before (the last one it cosigned for this log, or one it reaches by
+ * walking `history` forward from it), and never cosigns two different payloads
+ * for one (log, period). It may also recompute root, size, totals and
+ * settlements from the published files.
+ *
+ * Both checks need its record, the hash of every payload it cosigned per (log,
+ * period), and it never skips them for want of it (draft 3):
+ * - The record must survive restarts. Pass it back as `record`, and store each
+ *   new entry from `persist`, which runs before the cosignature is returned.
+ * - With no record for a log, it walks the chain back to the log's first
+ *   statement: `history` must start there (`previous` null, for the `from` of
+ *   the earliest key in the descriptor, which it then needs), unless the
+ *   statement is itself the first. With a record, `history` covers the periods
+ *   after the last one it cosigned; earlier statements in it are passed over,
+ *   and refused if they differ from a payload it cosigned.
+ * - A statement in front of it that carries its own valid cosignature, for a
+ *   (log, period) its record does not hold, shows that it lost its record. It
+ *   refuses: a witness that lost its record never cosigns for that log again
+ *   under the same kid. That check only catches what the log chose to publish,
+ *   which is why the record itself is kept.
+ *
+ * Its record holds what it cosigned, not what it refused. A refusal stands
+ * ("Refusals"): the caller keeps it and does not ask again for that period.
+ * It may cosign later statements that chain through a refused one.
  */
 export class Witness {
   readonly key: SigningKey;
   private readonly last = new Map<string, { hash: string; period: string }>();
   private readonly signed = new Map<string, string>(); // `${log} ${period}` -> payload hash
+  private readonly persist?: (entry: WitnessRecordEntry) => void;
 
-  constructor(key: SigningKey) {
+  constructor(key: SigningKey, opts: WitnessOptions = {}) {
     this.key = key;
+    this.persist = opts.persist;
+    for (const e of opts.record ?? []) this.remember(e);
+  }
+
+  /** Its record, one entry per (log, period) it cosigned, for storage. */
+  record(): WitnessRecordEntry[] {
+    return [...this.signed].map(([slot, hash]) => {
+      const i = slot.lastIndexOf(" ");
+      return { log: slot.slice(0, i), period: slot.slice(i + 1), hash };
+    });
+  }
+
+  private remember(e: WitnessRecordEntry): void {
+    if (typeof e?.log !== "string" || !/^https:\/\/[\x21-\x7e]+$/.test(e.log) || typeof e.period !== "string" || !PERIOD_PATTERN.test(e.period) || typeof e.hash !== "string" || !HEX64.test(e.hash)) {
+      throw new Error("a witness record entry needs an https log URL, a YYYY-MM period and a payload hash");
+    }
+    const slot = `${e.log} ${e.period}`;
+    const had = this.signed.get(slot);
+    if (had !== undefined && had !== e.hash) throw new Error(`the witness record holds two payloads for ${e.log} ${e.period}`);
+    this.signed.set(slot, e.hash);
+    const prev = this.last.get(e.log);
+    if (!prev || e.period > prev.period) this.last.set(e.log, { hash: e.hash, period: e.period });
   }
 
   cosign(
@@ -667,52 +828,99 @@ export class Witness {
       files?: { lines: string; settlements: string };
     },
   ): JwsEnvelope {
+    const refuse = (why: string): never => {
+      throw new Error(`witness refuses: ${why}`);
+    };
     const vopts: VerifyOptions = { resolveKey: opts.resolveKey, descriptor: opts.descriptor, authorizeLogKey: opts.authorizeLogKey };
     const st = verifyStatement({ statement: pub.statement, cosignatures: [] }, vopts);
-    if (!st.ok || !st.payload || !st.hash) throw new Error(`witness refuses: ${st.problems.join("; ")}`);
+    if (!st.ok || !st.payload || !st.hash) return refuse(st.problems.join("; "));
     const p = st.payload;
     const slot = `${p.log} ${p.period}`;
     const already = this.signed.get(slot);
-    if (already !== undefined && already !== st.hash) throw new Error(`witness refuses: already cosigned another payload for ${p.period}`);
+    if (already !== undefined) {
+      if (already !== st.hash) refuse(`already cosigned another payload for ${p.period}`);
+      // The same payload again: the same cosignature (its record already holds it).
+      return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+    }
+    const history = opts.history ?? [];
+    for (const s of [pub, ...history]) {
+      const lost = this.ownCosignatureWithoutRecord(s);
+      if (lost) refuse(`it cosigned ${lost} for this log before but its record does not hold that; a witness that lost its record does not cosign for that log again under ${this.key.kid}`);
+    }
 
-    if (already === undefined) {
-      const last = this.last.get(p.log);
-      // A log's first statement (previous null) is for the `from` of its earliest key.
-      if (!last && p.previous === null && opts.descriptor) {
-        const first = firstPeriod(opts.descriptor);
-        if (first !== undefined && p.period !== first) throw new Error(`witness refuses: the log's first period is ${first}, not ${p.period}`);
+    // Walk forward from the last payload it cosigned for this log, or, with no record for the log,
+    // from the log's first statement.
+    const last = this.last.get(p.log);
+    let at: { hash: string; period: string } | undefined = last;
+    let first: string | undefined;
+    if (!last) {
+      if (!opts.descriptor) refuse("it has no record for this log, and checking the log's first statement needs the log's descriptor");
+      first = firstPeriod(opts.descriptor as Pick<LogDescriptor, "keys">);
+      if (first === undefined) refuse("the log's descriptor lists no keys");
+    }
+    for (const h of history) {
+      const hs = checkStatement({ statement: h.statement, cosignatures: [] }, vopts, false);
+      if (!hs.ok || !hs.payload || !hs.hash) refuse("a history statement does not verify");
+      const hp = hs.payload as StatementPayload;
+      if (hp.log !== p.log) refuse("a history statement is for another log");
+      if (last && hp.period <= last.period) {
+        // Up to the last payload it cosigned, its record is what counts: history there may only
+        // repeat a payload it holds (a period it refused or never saw is passed over).
+        const held = this.signed.get(`${hp.log} ${hp.period}`);
+        if (held !== undefined && held !== hs.hash) refuse(`history holds another payload for ${hp.period} than the one it cosigned`);
+        continue;
       }
-      if (last) {
-        let hash = last.hash;
-        let period = last.period;
-        for (const h of opts.history ?? []) {
-          const hs = verifyStatement({ statement: h.statement, cosignatures: [] }, vopts);
-          if (!hs.ok || !hs.payload || !hs.hash) throw new Error("witness refuses: a history statement does not verify");
-          if (hs.payload.log !== p.log || hs.payload.previous !== hash || hs.payload.period !== nextPeriod(period)) {
-            throw new Error("witness refuses: history does not chain to the last cosigned payload");
-          }
-          hash = hs.hash;
-          period = hs.payload.period;
-        }
-        if (p.previous !== hash || p.period !== nextPeriod(period)) {
-          throw new Error("witness refuses: previous does not chain to the last payload it cosigned");
-        }
+      if (at === undefined) {
+        if (hp.previous !== null || hp.period !== first) refuse(`with no record for this log, history must start at the log's first statement (${first}, previous null)`);
+      } else if (hp.previous !== at.hash || hp.period !== nextPeriod(at.period)) {
+        refuse(last ? "history does not chain to the last cosigned payload" : "history does not chain");
       }
-      if (opts.files) {
-        const lines = parseFileBody(opts.files.lines);
-        const b = buildBatch(lines);
-        if (b.period !== null && b.period !== p.period) throw new Error("witness refuses: the lines are for another period");
-        if (b.root !== p.root || b.size !== p.size || canonicalizeStrict(b.totals) !== canonicalizeStrict(p.totals)) {
-          throw new Error("witness refuses: lines do not reproduce root, size and totals");
-        }
-        if (sha256Hex(opts.files.settlements) !== p.settlements) throw new Error("witness refuses: settlements file hash differs");
-        if (!settlementsMatchTotals(parseFileBody(opts.files.settlements), p.totals)) throw new Error("witness refuses: settlements do not add up to totals");
+      at = { hash: hs.hash as string, period: hp.period };
+    }
+    if (at === undefined) {
+      // No record and no history: this must be the log's first statement.
+      if (p.previous !== null) refuse(`previous is not null, and with no record for this log it needs history back to the log's first statement (${first})`);
+      if (p.period !== first) refuse(`the log's first period is ${first}, not ${p.period}`);
+    } else if (p.previous !== at.hash || p.period !== nextPeriod(at.period)) {
+      refuse(history.length && !last ? "previous does not chain to the history" : "previous does not chain to the last payload it cosigned");
+    }
+
+    if (opts.files) {
+      const lines = parseFileBody(opts.files.lines);
+      const b = buildBatch(lines);
+      if (b.period !== null && b.period !== p.period) refuse("the lines are for another period");
+      if (b.root !== p.root || b.size !== p.size || canonicalizeStrict(b.totals) !== canonicalizeStrict(p.totals)) {
+        refuse("lines do not reproduce root, size and totals");
+      }
+      if (sha256Hex(opts.files.settlements) !== p.settlements) refuse("settlements file hash differs");
+      if (!settlementsMatchTotals(parseFileBody(opts.files.settlements), p.totals)) refuse("settlements do not add up to totals");
+    }
+    const entry: WitnessRecordEntry = { log: p.log, period: p.period, hash: st.hash };
+    // Stored before the cosignature leaves: a crash after this point can only repeat it.
+    this.persist?.(entry);
+    this.remember(entry);
+    return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+  }
+
+  /** The period of `s` if `s` carries this witness's valid cosignature over its payload but its record holds another payload or none for it. */
+  private ownCosignatureWithoutRecord(s: PublishedStatement): string | undefined {
+    let d: ReturnType<typeof decodeStatement>;
+    try {
+      d = decodeStatement(s?.statement);
+    } catch {
+      return undefined;
+    }
+    for (const c of s.cosignatures ?? []) {
+      try {
+        const cd = jwsDecode(c.signature);
+        if (cd.header.kid !== this.key.kid || Buffer.compare(Buffer.from(cd.payloadBytes), Buffer.from(d.bytes)) !== 0) continue;
+        if (!jwsVerify(c.signature, this.key.publicKey)) continue;
+        if (this.signed.get(`${d.payload.log} ${d.payload.period}`) !== d.hash) return d.payload.period;
+      } catch {
+        // an unreadable cosignature is not its own
       }
     }
-    this.signed.set(slot, st.hash);
-    const prevLast = this.last.get(p.log);
-    if (!prevLast || p.period > prevLast.period) this.last.set(p.log, { hash: st.hash, period: p.period });
-    return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+    return undefined;
   }
 }
 
@@ -734,11 +942,28 @@ export interface FundView {
 }
 
 /**
+ * A fund's record (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund"): every
+ * settlement reference it has attested, with the log that listed it and the
+ * amount listed for it so far, and every statement it has cosigned. It covers
+ * every log that pays the fund and has to survive restarts. Draft 3 does not
+ * bound it (an open question there).
+ */
+export interface FundRecord {
+  refs: Array<{ ref: string; log: string; used: string }>;
+  cosigned: Array<{ log: string; period: string; hash: string }>;
+}
+
+/**
  * A fund that cosigns a statement attests, for every totals row that names it,
  * that each settlement reference listed for it exists and is credited to it,
  * that across every statement it has cosigned (any log, this log's earlier
  * periods included) the amounts listed for one reference never add up to more
  * than that reference credited to it, and that the amounts add up to the row.
+ *
+ * Its record comes back from storage as `record`, and `persist` receives what
+ * each cosignature adds to it (the references it changes, with their new
+ * totals, and the statement) before the cosignature is returned; if it
+ * throws, nothing is cosigned.
  */
 export class FundCosigner {
   readonly fund: string;
@@ -746,14 +971,32 @@ export class FundCosigner {
   readonly view: FundView;
   /** receiverAuthorizer of each log, from the log's descriptor. */
   readonly logAuthorizers: Map<string, string>;
-  private readonly refs = new Map<string, { log: string; used: bigint }>();
-  private readonly done = new Map<string, { hash: string; envelope: JwsEnvelope }>();
+  private readonly refs = new Map<string, { ref: string; log: string; used: bigint }>();
+  private readonly done = new Map<string, { hash: string; envelope?: JwsEnvelope }>();
+  private readonly persist?: (added: FundRecord) => void;
 
-  constructor(opts: { fund: string; key: SigningKey; view: FundView; logAuthorizers?: Record<string, string> }) {
+  constructor(opts: { fund: string; key: SigningKey; view: FundView; logAuthorizers?: Record<string, string>; record?: FundRecord; persist?: (added: FundRecord) => void }) {
     this.fund = canonicalAccount(opts.fund);
     this.key = opts.key;
     this.view = opts.view;
     this.logAuthorizers = new Map(Object.entries(opts.logAuthorizers ?? {}));
+    this.persist = opts.persist;
+    for (const r of opts.record?.refs ?? []) {
+      if (typeof r?.ref !== "string" || typeof r.log !== "string" || typeof r.used !== "string" || !/^[0-9]+$/.test(r.used)) throw new Error("a fund record reference needs ref, log and used");
+      this.refs.set(fundRefKey(r.log, r.ref), { ref: r.ref, log: r.log, used: BigInt(r.used) });
+    }
+    for (const c of opts.record?.cosigned ?? []) this.done.set(`${c.log} ${c.period}`, { hash: c.hash });
+  }
+
+  /** Its whole record, for storage. */
+  record(): FundRecord {
+    return {
+      refs: [...this.refs.values()].map((r) => ({ ref: r.ref, log: r.log, used: r.used.toString() })),
+      cosigned: [...this.done].map(([slot, d]) => {
+        const i = slot.lastIndexOf(" ");
+        return { log: slot.slice(0, i), period: slot.slice(i + 1), hash: d.hash };
+      }),
+    };
   }
 
   cosign(pub: PublishedStatement, settlementsBody: string, opts: Omit<VerifyOptions, "requireCosigners">): JwsEnvelope {
@@ -763,8 +1006,10 @@ export class FundCosigner {
     const slot = `${p.log} ${p.period}`;
     const prev = this.done.get(slot);
     if (prev) {
-      if (prev.hash === st.hash) return prev.envelope;
-      throw new Error(`fund refuses: already cosigned another payload for ${p.period}`);
+      if (prev.hash !== st.hash) throw new Error(`fund refuses: already cosigned another payload for ${p.period}`);
+      // The same payload again. After a restart the record has its hash, not the envelope: sign again.
+      prev.envelope ??= { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+      return prev.envelope;
     }
     if (sha256Hex(settlementsBody) !== p.settlements) throw new Error("fund refuses: settlements file hash differs");
     const entries = parseFileBody(settlementsBody).map(parseSettlement);
@@ -782,9 +1027,9 @@ export class FundCosigner {
     for (const e of entries.filter(mine)) {
       if (!rows.some((r) => r.asset === e.asset)) throw new Error(`fund refuses: ${e.ref} is listed for ${e.asset}, which has no totals row`);
     }
-    // Payout references are the processor's own, so they are keyed by log; transfers and claims are global.
-    const keyOf = (ref: string) => (ref.startsWith("payout:") ? `${p.log} ${ref}` : ref);
+    const keyOf = (ref: string) => fundRefKey(p.log, ref);
     const pending = new Map<string, bigint>(); // what this statement lists per reference
+    const refOf = new Map<string, string>();
     for (const row of rows) {
       let sum = 0n;
       for (const e of entries.filter((x) => mine(x) && x.asset === row.asset)) {
@@ -818,12 +1063,22 @@ export class FundCosigner {
           throw new Error(`fund refuses: ${e.ref} is not a known kind of reference`);
         }
         pending.set(key, (pending.get(key) ?? 0n) + amt);
+        refOf.set(key, e.ref);
       }
       if (sum !== BigInt(row.amount)) throw new Error(`fund refuses: settlements for ${row.asset} do not add up to the totals row`);
     }
-    for (const [key, amt] of pending) this.refs.set(key, { log: p.log, used: (this.refs.get(key)?.used ?? 0n) + amt });
+    const added: FundRecord = {
+      refs: [...pending].map(([key, amt]) => ({ ref: refOf.get(key) as string, log: p.log, used: ((this.refs.get(key)?.used ?? 0n) + amt).toString() })),
+      cosigned: [{ log: p.log, period: p.period, hash: st.hash as string }],
+    };
+    // Stored before the cosignature leaves, as a witness's record is.
+    this.persist?.(added);
+    for (const r of added.refs) this.refs.set(fundRefKey(r.log, r.ref), { ref: r.ref, log: r.log, used: BigInt(r.used) });
     const envelope: JwsEnvelope = { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
     this.done.set(slot, { hash: st.hash as string, envelope });
     return envelope;
   }
 }
+
+/** Payout references are the processor's own, so a fund keys them by log; transfers and claims are global. */
+const fundRefKey = (log: string, ref: string): string => (ref.startsWith("payout:") ? `${log} ${ref}` : ref);

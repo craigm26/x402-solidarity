@@ -14,7 +14,7 @@ import type { PublishedStatement } from "../../../src/solidarity/index.ts";
 import type { SimHooks } from "../io.ts";
 import { NotYet } from "../engine.ts";
 import { Crash } from "../store.ts";
-import { at, collected, HOUR, invariants, restart, rig, tickAfter } from "./harness.ts";
+import { at, collected, HOUR, invariants, published, restart, rig, runUntil, tickAfter } from "./harness.ts";
 import type { Rig } from "./harness.ts";
 
 /** A log with one finished cycle, and hooks to set for the next. */
@@ -105,7 +105,11 @@ test("C2: the purchase executed but its answer was lost", async (t) => {
 });
 
 test("C3: dies after the settled row, before the share's intent", async (t) => {
-  for (const [name, wait] of [["resumed in time: submitted", 30], ["resumed too late: recorded as never sent, uncollected", 700]] as const) {
+  for (const [name, wait] of [
+    ["resumed in time: submitted", 30],
+    ["resumed with under a minute left: never sent; it waits for validBefore to pass, then reads the chain", 560],
+    ["resumed too late: never sent, and uncollected only once the chain shows it unused after validBefore", 700],
+  ] as const) {
     await t.test(name, async () => {
       const { r } = await warm();
       r.store.onAppend = (kind) => {
@@ -121,7 +125,10 @@ test("C3: dies after the settled row, before the share's intent", async (t) => {
       if (wait === 30) assert.equal(sum.state, "collected");
       else {
         assert.equal(sum.state, "uncollected");
-        assert.equal(r2.store.get("result", `submit:${shareNonce(c)}`)?.body.via, "engine");
+        // Draft 3: no "never sent" shortcut. The answer is the chain's, read after validBefore.
+        const result = r2.store.get("result", `submit:${shareNonce(c)}`);
+        assert.deepEqual([result?.body.via, result?.body.used], ["chain", false]);
+        assert.ok((result?.at ?? 0) > c.body.share.validBefore + 30, "recorded only after validBefore + 30 seconds");
         assert.equal(r2.store.get("lookup", `lookup:${shareNonce(c)}`)?.body.found, null);
         assert.equal(r2.world.executions.get(shareNonce(c)), undefined);
         assert.equal(JSON.parse(r2.engine.serve(`/proofs/${c.body.share.id}`).body).status, "uncollected");
@@ -129,6 +136,42 @@ test("C3: dies after the settled row, before the share's intent", async (t) => {
       assert.deepEqual(invariants(r2), []);
     });
   }
+});
+
+test("C3, records from before draft 3: a share the old code answered itself (never sent, via engine) replays as queued, and is uncollected when its month closes", async () => {
+  const { r } = await warm("2026-10-31T00:00:00Z");
+  r.store.onAppend = (kind) => {
+    if (kind === "intent") throw r.store.kill("before the share intent");
+  };
+  const r2 = await crashAndRestart(r);
+  const c = lastCycle(r2);
+  // What the draft 2 code wrote when it resumed with under a minute left on the share: an answer
+  // from the engine itself, before validBefore, a lookup that found nothing, and the share
+  // uncollected at once (draft 3 forbids that before validBefore has passed).
+  const t = c.body.share.validBefore - 40;
+  const nonce = shareNonce(c);
+  r2.store.append("result", `submit:${nonce}`, t, { ok: false, error: "not submitted before validBefore", via: "engine", role: "share", cycle: c.key });
+  r2.store.append("lookup", `lookup:${nonce}`, t, { found: null, window: { fromBlock: String(c.body.block), toBlock: String(BigInt(c.body.block) + 550n) } });
+  const old = { status: "accepted", reason: null, period: "2026-10", amount: "1000", state: "uncollected", transaction: null };
+  r2.store.append("cycle-end", c.key, t, { summary: old, error: "not submitted before validBefore" });
+  await r2.store.sync();
+
+  const r3 = await restart(r2);
+  assert.equal(r3.engine.degraded, undefined, r3.engine.degraded);
+  assert.equal(r3.blockedCalls, 0);
+  assert.deepEqual(JSON.parse(r3.engine.serve(`/proofs/${c.body.share.id}`).body), { status: "queued" }, "replayed at its recorded clock, before validBefore: not yet uncollected");
+  // Closing October looks again: its validBefore has passed and the recorded answer shows it unused.
+  await runUntil(r3, at("2026-11-01T06:00:00Z"));
+  assert.ok(r3.store.get("close", "2026-10"));
+  assert.deepEqual(JSON.parse(r3.engine.serve(`/proofs/${c.body.share.id}`).body), { status: "uncollected" });
+  assert.doesNotMatch(r3.engine.serve("/lines/2026-10").body, new RegExp(c.body.share.id));
+  assert.deepEqual(r3.store.get("cycle-end", c.key)?.body.summary, old, "the record is never rewritten");
+  assert.equal(r3.world.executions.get(nonce), undefined);
+  assert.deepEqual(invariants(r3), []);
+  // Replayed again, the same records give the same published bodies.
+  const r4 = await restart(r3);
+  assert.equal(r4.engine.degraded, undefined, r4.engine.degraded);
+  assert.deepEqual(published(r4), published(r3));
 });
 
 test("C4: dies after the share's intent, before its POST left", async (t) => {

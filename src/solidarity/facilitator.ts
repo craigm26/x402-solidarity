@@ -10,13 +10,17 @@
  *   `SettleResponse.extensions.solidarity`; an optional `{status}` goes to the
  *   seller in EXTENSION-RESPONSES. Core SettleResponse fields never change.
  * - The log decides from checks it can make at once; an accepted `exact`
- *   share's transfer is submitted afterwards (`followUp`).
+ *   share's transfer is submitted afterwards (`followUp`). It is collected
+ *   once its authorization executes, and uncollected only once it can no
+ *   longer execute (draft 3); until then it stays queued.
  * - `onSettled` is total: whatever is wrong with a share, it returns the
  *   purchase's SettleResponse with its core fields unchanged.
  * - Refunds: `keep` only in separate mode. Refund settles never trigger a
  *   share and never adjust one (`onPurchaseRefund`).
  * - Month close: claims, the batch, the settlements file and a JCS statement
  *   signed with the log's key and chained by `previous`.
+ * - Retiring: stop accepting shares, resolve them all, then set `until` on
+ *   the log's key after its final statement (`stopAccepting`, `retire`).
  */
 
 import { getAddress } from "viem";
@@ -26,7 +30,7 @@ import type { BatchVoucherPayload, ExactEip3009Payload, VoucherFields } from "./
 import { computeChannelId, isBatchVoucherPayload, isExactEip3009Payload, verifyEip3009Signature, verifyVoucherSignature } from "./evm.ts";
 import type { SigningKey } from "./ledger.ts";
 import { formatLine, formatSettlement } from "./ledger.ts";
-import type { ProofResult } from "./book.ts";
+import type { LogBookOptions, ProofResult, RetireOptions } from "./book.ts";
 import { LogBook } from "./book.ts";
 import { resolveFlow } from "./client.ts";
 import { solidarityOutcomeSchema, solidaritySchema, validateSchema } from "./schema.ts";
@@ -72,9 +76,29 @@ export interface LogChain {
   /**
    * Optional: the transaction that executed this EIP-3009 authorization, whoever submitted it, and
    * what it moved (a real chain reads the token's AuthorizationUsed and Transfer events). Without
-   * it, a share whose authorization someone else executed first is reported uncollected.
+   * it, a share whose authorization someone else executed first is never seen collected: it stays
+   * queued (authorizationUsed says used), and is recorded late if this is added and finds it.
    */
   findExactTransfer?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<{ transaction: string; token: string; to: string; value: bigint } | undefined>;
+  /**
+   * Optional: EIP-3009 `authorizationState(from, nonce)` of an exact share's authorization on its
+   * token: true once it was used or cancelled. "A failed or unanswered submit does not show"
+   * that a transfer never executed ("Share kinds"): the log reports an exact share uncollected
+   * only once its validBefore has passed (on the log's clock, by `expiryMarginSeconds`) and this
+   * says false. Without it the log can never show that, so a share whose transfer failed stays
+   * queued: closePeriod waits for it until the claim grace runs out, then closes without it, and
+   * it is recorded late if it ever executes.
+   */
+  authorizationUsed?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean>;
+  /**
+   * Optional: whether the chain shows this authorization cancelled (EIP-3009 cancelAuthorization;
+   * USDC emits AuthorizationCanceled). USDC's authorizationState reads true for a cancelled
+   * authorization as for a used one, but a cancelled one never executed and never can. With
+   * this, a cancelled share is uncollected once its validBefore has passed, as an unused one is
+   * ("Share kinds": "expired, cancelled, or the balance was too low"; README, "Where the spec
+   * was unclear"). Without it, a cancelled share stays queued.
+   */
+  authorizationCanceled?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean>;
   /**
    * Optional: check an `exact` share with the facilitator's own scheme code, "as /verify and
    * /settle would", with paymentPayload {x402Version: 2, accepted, payload} and
@@ -97,7 +121,8 @@ interface ShareRecord {
   amount: bigint;
   state: ShareState;
   line: string;
-  exact?: { accepted: PaymentRequirements; payload: ExactEip3009Payload; transaction?: string; error?: string };
+  /** `inFlight` while a submit or a look at the chain runs, so a second one never starts beside it. */
+  exact?: { accepted: PaymentRequirements; payload: ExactEip3009Payload; transaction?: string; error?: string; inFlight?: boolean };
   batch?: { channelId: string; from: bigint; to: bigint };
 }
 
@@ -141,9 +166,24 @@ export interface SolidarityLogOptions {
   clock?: () => number;
   /**
    * How long after a period ends the log keeps retrying failed claims before it closes the period
-   * anyway, with those shares uncollected. Default 14 days, inside the spec's 15-day SHOULD.
+   * anyway, with those shares uncollected. Default 14 days: draft 3 says a log SHOULD retry a failed
+   * claim until 14 days after the share's period ends and then stop, so the statement can still
+   * appear within the 15 days of "Statements" (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Optional share kind:
+   * `batch-settlement`"). An exact share whose transfer is not final waits as long, then the
+   * period closes without it (it is never reported uncollected for that).
    */
   claimGraceSeconds?: number;
+  /**
+   * How long after an exact share's validBefore, on the log's clock, the log takes it as passed,
+   * since block timestamps can lag that clock. Default 30 seconds.
+   */
+  expiryMarginSeconds?: number;
+  /**
+   * Stores each statement durably before it is published or sent to a witness or the fund (see
+   * LogBookOptions.persist). Without it, keeping the statement (or `issuedAt` with every other
+   * input) before publishing it is the caller's job.
+   */
+  persistStatement?: LogBookOptions["persist"];
 }
 
 const CORE_FIELDS = ["success", "errorReason", "payer", "transaction", "network", "amount"] as const;
@@ -161,6 +201,8 @@ export class SolidarityLog {
   private readonly chain: LogChain;
   private readonly clock: () => number;
   private readonly claimGraceSeconds: number;
+  private readonly expiryMarginSeconds: number;
+  private acceptingShares = true;
 
   private readonly shares = new Map<string, ShareRecord>();
   private readonly reserved = new Set<string>();
@@ -171,10 +213,11 @@ export class SolidarityLog {
 
   constructor(opts: SolidarityLogOptions) {
     this.descriptor = opts.descriptor;
-    this.book = new LogBook(opts.descriptor, opts.key);
-    this.chain = opts.chain;
     this.clock = opts.clock ?? (() => Math.floor(Date.now() / 1000));
+    this.book = new LogBook(opts.descriptor, opts.key, { persist: opts.persistStatement, clock: this.clock });
+    this.chain = opts.chain;
     this.claimGraceSeconds = opts.claimGraceSeconds ?? 14 * 86400;
+    this.expiryMarginSeconds = opts.expiryMarginSeconds ?? 30;
   }
 
   // ---- verify --------------------------------------------------------------
@@ -189,8 +232,20 @@ export class SolidarityLog {
   /**
    * Call after the purchase's /settle returns. Returns the SettleResponse to
    * send, with the solidarity outcome added when the payload carried a share.
+   *
+   * If the settle's response was lost, the log MAY treat it as succeeded once
+   * the chain shows the purchase collected ("Facilitator behaviour", step 2):
+   * pass a SettleResponse built from the chain (success, its transaction, and
+   * the amount collected, which is the basis). Every check still applies, so a
+   * share whose validBefore is too close is skipped, and the buyer learns the
+   * outcome from /proofs/<id>.
+   *
+   * Once the log has stopped accepting shares (retiring), the purchase's
+   * response passes through with no outcome, as from a facilitator without
+   * the extension.
    */
   async onSettled(paymentPayload: PaymentPayload, requirements: PaymentRequirements, settleResponse: SettleResponse): Promise<SettledResult> {
+    if (!this.acceptingShares) return { settleResponse, followUp: Promise.resolve() };
     let info: SolidarityInfo | undefined;
     try {
       info = extractSolidarity(paymentPayload);
@@ -242,8 +297,9 @@ export class SolidarityLog {
       // nothing is charged; the client leaves its channel state as it was.
       outcome = this.withChannel({ ...base, status: "skipped", reason: "purchase-not-final" }, info);
     } else if (!settleResponse.success && settleResponse.errorReason === "settlement_pending" && settleResponse.transaction) {
-      // Spec choice: the share is only held here. Its checks run when the purchase confirms
-      // (resolvePending), and its period is the month it is accepted then.
+      // The share is only held here ("Purchases that can carry a share"): its checks run when the
+      // purchase confirms (resolvePending), as if its settle had just succeeded, and its period is
+      // the month in which it is accepted then.
       const id = isValidShareId(info.id) && !this.shares.has(info.id) && !this.reserved.has(info.id) ? info.id : undefined;
       if (id) {
         this.reserved.add(id);
@@ -264,8 +320,13 @@ export class SolidarityLog {
 
   /**
    * A `settlement_pending` purchase was resolved. If it confirmed, the held
-   * share is processed now; if it failed, the share is dropped. The buyer
-   * already has its response, so the result is visible through /proofs/<id>.
+   * share is processed now, as if its settle had just succeeded: its checks
+   * run now, and its period is the month in which it is accepted now
+   * ("Purchases that can carry a share";
+   * https://craigmerry.com/solidarity-levy/spec/attestation.md, "Accepted and uncollected shares"). If it
+   * failed, the share is dropped. The buyer already has its response, so the
+   * result is visible through /proofs/<id>. A share held before the log
+   * stopped accepting shares is still processed.
    */
   async resolvePending(transaction: string, confirmed: boolean, finalResponse?: SettleResponse): Promise<{ outcome: SolidarityOutcome; followUp: Promise<void> } | undefined> {
     const p = this.pending.get(transaction);
@@ -561,37 +622,133 @@ export class SolidarityLog {
     return snap;
   }
 
+  /**
+   * The follow-up of an accepted exact share: submit its transfer. It is
+   * collected once its authorization has executed and paid the fund, whoever
+   * submitted it. A failed or unanswered submit does not make it uncollected
+   * ("Share kinds", draft 3): only once its validBefore has passed and the
+   * chain shows the authorization unused. Until then it stays queued, and
+   * closePeriod or reconcileExact looks again.
+   */
   private async submitExact(rec: ShareRecord): Promise<void> {
     const ex = rec.exact as NonNullable<ShareRecord["exact"]>;
+    if (ex.inFlight) return;
+    ex.inFlight = true;
     try {
       const r = await this.chain.submitExact(ex.accepted, ex.payload);
-      let transaction = r.ok ? r.transaction : undefined;
-      if (!r.ok) {
-        ex.error = r.error;
-        // Anyone holding the signed authorization can submit it, the relaying seller among them.
-        // If it was executed and paid the share's value to the fund, the share is collected all
-        // the same, with that transaction as its reference.
-        transaction = await this.executedElsewhere(ex, rec.amount);
+      if (r.ok) {
+        this.collectExact(rec, r.transaction);
+        return;
       }
-      if (transaction) {
-        ex.transaction = transaction;
-        rec.state = "collected";
-        this.addSettlement(rec.period, formatSettlement({ fund: rec.fund, asset: rec.asset, ref: `exact:${transaction}`, amount: rec.amount }));
-      } else {
-        // ("Share kinds": "If the transfer never executes (expired, cancelled, or the balance was too
-        // low), the share is uncollected.")
-        rec.state = "uncollected";
-      }
+      ex.error = r.error;
+      await this.readExactFromChain(rec);
     } catch (e) {
-      ex.error = (e as Error).message;
-      rec.state = "uncollected";
+      // Nothing is concluded from an error: the share stays as it was, queued.
+      ex.error = (e as Error)?.message ?? String(e);
+    } finally {
+      ex.inFlight = false;
     }
+  }
+
+  /**
+   * After a submit failed, or when the log looks again: what the chain says.
+   * Executed (by anyone: the relaying seller can submit it first) and paid the
+   * fund the share's amount: collected, with that transaction as its
+   * reference. Can no longer execute: uncollected. Anything else: unchanged.
+   */
+  private async readExactFromChain(rec: ShareRecord): Promise<void> {
+    const ex = rec.exact as NonNullable<ShareRecord["exact"]>;
+    const transaction = await this.executedElsewhere(ex, rec.amount);
+    if (transaction) this.collectExact(rec, transaction);
+    else if (rec.state === "queued" && (await this.cannotExecute(ex))) rec.state = "uncollected";
   }
 
   private async executedElsewhere(ex: NonNullable<ShareRecord["exact"]>, amount: bigint): Promise<string | undefined> {
     const t = await this.chain.findExactTransfer?.(ex.accepted, ex.payload);
     if (!t || !sameAccount(t.token, ex.accepted.asset) || !sameAccount(t.to, ex.accepted.payTo) || t.value !== amount) return undefined;
     return t.transaction;
+  }
+
+  /**
+   * "If the transfer never executes (expired, cancelled, or the balance was
+   * too low), the share is uncollected", but the log "MUST NOT report the
+   * share uncollected until its validBefore has passed and the chain shows the
+   * authorization unused (EIP-3009 authorizationState)" ("Share kinds").
+   * A cancelled authorization reads as used there; the chain shows it never
+   * executed through authorizationCanceled, which is taken as the same
+   * evidence (README, "Where the spec was unclear").
+   */
+  private async cannotExecute(ex: NonNullable<ShareRecord["exact"]>): Promise<boolean> {
+    if (!this.chain.authorizationUsed) return false;
+    let validBefore: bigint;
+    try {
+      validBefore = BigInt(ex.payload.authorization.validBefore);
+    } catch {
+      return false;
+    }
+    if (BigInt(this.clock()) < validBefore + BigInt(this.expiryMarginSeconds)) return false;
+    if ((await this.chain.authorizationUsed(ex.accepted, ex.payload)) === false) return true;
+    return (await this.chain.authorizationCanceled?.(ex.accepted, ex.payload)) === true;
+  }
+
+  /**
+   * The share is collected, with `transaction` as its settlement reference: in
+   * its own period while that is open. A share the log reported uncollected,
+   * or one its closed period went out without, is recorded late instead: in
+   * the period in which the log sees it executed, with the amount it accepted
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Accepted and uncollected shares"; "Lines", `period`).
+   * /proofs/<id> follows the new line.
+   */
+  private collectExact(rec: ShareRecord, transaction: string): void {
+    const ex = rec.exact as NonNullable<ShareRecord["exact"]>;
+    const late = rec.state === "uncollected" || this.book.get(rec.period) !== undefined;
+    const period = late ? periodOf(this.clock()) : rec.period;
+    // Written first: if the period is closed (a clock that ran backwards), nothing changes.
+    this.book.addSettlement(period, formatSettlement({ fund: rec.fund, asset: rec.asset, ref: `exact:${transaction}`, amount: rec.amount }));
+    if (late) {
+      rec.period = period;
+      rec.line = formatLine({ period, fund: rec.fund, asset: rec.asset, id: rec.id, amount: rec.amount });
+    }
+    ex.transaction = transaction;
+    rec.state = "collected";
+  }
+
+  /**
+   * Look again at one exact share that is queued or was reported uncollected.
+   * A queued one still valid and unused is submitted again. A retired log
+   * looks no more: it issues no statement after its final one, so it could
+   * not record a share late (it resolved every share before retiring).
+   */
+  private async recheckExact(rec: ShareRecord): Promise<void> {
+    const ex = rec.exact;
+    if (!ex || ex.inFlight || rec.state === "collected" || this.book.retired) return;
+    ex.inFlight = true;
+    try {
+      await this.readExactFromChain(rec);
+      if (rec.state !== "queued") return;
+      if (BigInt(this.clock()) >= BigInt(ex.payload.authorization.validBefore)) return;
+      const r = await this.chain.submitExact(ex.accepted, ex.payload);
+      if (r.ok) this.collectExact(rec, r.transaction);
+      else ex.error = r.error;
+    } catch (e) {
+      ex.error = (e as Error)?.message ?? String(e);
+    } finally {
+      ex.inFlight = false;
+    }
+  }
+
+  /**
+   * Look again at every exact share that is not collected
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Accepted and uncollected shares"). A queued share is
+   * collected if its authorization executed, uncollected once it can no longer
+   * execute, and submitted again while it is still valid and unused. A share
+   * the log reported uncollected whose transfer it now sees executed (its view
+   * of the chain was behind) is recorded late, in the current period. Shares
+   * whose submit is still running are left to it. closePeriod looks at the
+   * queued ones itself; call this from a timer for the rest.
+   */
+  async reconcileExact(): Promise<void> {
+    for (const rec of [...this.shares.values()]) if (rec.kind === "exact") await this.recheckExact(rec);
   }
 
   private addSettlement(period: string, entry: string): void {
@@ -675,45 +832,57 @@ export class SolidarityLog {
   // ---- month close -------------------------------------------------------------------
 
   /**
-   * Close period P: claim outstanding vouchers, leave out uncollected shares,
-   * build the batch and settlements file, and sign a statement whose
-   * `previous` is the hash of the previous period's payload.
+   * Close period P: claim outstanding vouchers, look again at exact shares
+   * whose transfer is not final, leave out uncollected shares, build the batch
+   * and settlements file, and sign a statement whose `previous` is the hash of
+   * the previous period's payload.
    *
-   * While a claim keeps failing, closing refuses (try again) until the claim
-   * grace after P ends has run out. Then a share still queued is uncollected,
-   * and so is every later share on its channel, since claims are cumulative;
-   * the log lowers that channel's chargedCumulativeAmount to what it has
-   * claimed, as for a channel that can no longer pay. One stuck claim can then
-   * never hold back P's statement, or every statement after it.
+   * While a claim keeps failing, or an exact share's transfer is not final,
+   * closing refuses (try again) until the claim grace after P ends has run
+   * out: 14 days by default, so the statement can still appear within the 15
+   * days of https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements". Then a batch-settlement share still queued is
+   * uncollected, and so is every later share on its channel, since claims are
+   * cumulative; the log lowers that channel's chargedCumulativeAmount to what
+   * it has claimed, as for a channel that can no longer pay. An exact share
+   * still queued is left out but never reported uncollected for that: it stays
+   * queued, and is recorded late if it executes (reconcileExact). One stuck
+   * share can then never hold back P's statement, or every statement after it.
    *
    * `opts.signed` is the statement this log signed for P before, for a log
    * that rebuilds itself from stored records: see LogBook.close. With it the
    * log's private key is not used, and the statement is byte for byte the
-   * stored one, or closing throws and P stays open.
+   * stored one, or closing throws and P stays open. A log issues one payload
+   * per period, ever: a log that restarts closes P with its stored statement
+   * (and the `issuedAt` it stored, or none to take the statement's own), never
+   * a new one
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Statements"; `persistStatement`).
    */
   async closePeriod(period: string, issuedAt?: number, opts: { signed?: JwsEnvelope } = {}): Promise<PublishedStatement> {
     const now = this.clock();
+    if (this.book.retired) throw new Error(`the log has retired: its final statement is for ${this.book.finalPeriod}`);
     if (period >= periodOf(now)) throw new Error(`cannot close ${period} before it ends`);
     const next = this.book.nextToClose;
     if (next && period !== next) throw new Error(`the next statement must be for ${next}`);
     await this.claimOutstanding();
+    for (const rec of [...this.shares.values()]) if (rec.kind === "exact" && rec.state === "queued" && rec.period <= period) await this.recheckExact(rec);
     const inPeriod = [...this.shares.values()].filter((s) => s.period === period);
     const stuck = inPeriod.filter((s) => s.state === "queued");
     if (stuck.length > 0) {
-      if (now < periodStart(nextPeriod(period)) + this.claimGraceSeconds) throw new Error(`unresolved shares in ${period} (a claim failed; try again)`);
+      if (now < periodStart(nextPeriod(period)) + this.claimGraceSeconds) throw new Error(`unresolved shares in ${period} (a claim failed or a transfer is not final; try again)`);
       await this.giveUp(stuck);
     }
     // Uncollected shares are removed before the tree is built.
     const lines = inPeriod.filter((s) => s.state === "collected").map((s) => s.line);
-    return this.book.close(period, lines, issuedAt ?? Math.max(now, periodStart(nextPeriod(period))), opts.signed);
+    // Without `signed`, issuedAt is now: the time of the statement's first write. With it, the
+    // stored statement's own issuedAt unless one is given.
+    return this.book.close(period, lines, issuedAt ?? (opts.signed ? undefined : Math.max(now, periodStart(nextPeriod(period)))), opts.signed);
   }
 
   private async giveUp(stuck: ShareRecord[]): Promise<void> {
     for (const rec of stuck) {
-      if (!rec.batch) {
-        rec.state = "uncollected"; // an exact transfer that never confirmed
-        continue;
-      }
+      // An exact share whose transfer is not final is left out of the batch, still queued: it may
+      // only be reported uncollected once it can no longer execute ("Share kinds").
+      if (!rec.batch) continue;
       const cr = this.channels.get(rec.batch.channelId) as ChannelRecord;
       await this.withChannelLock(cr.channelId, async () => {
         for (const id of cr.shares) {
@@ -729,6 +898,56 @@ export class SolidarityLog {
   /** Attach a witness or fund cosignature to a published statement. */
   addCosignature(period: string, cosignature: JwsEnvelope): void {
     this.book.addCosignature(period, cosignature);
+  }
+
+  // ---- retiring ------------------------------------------------------------------------
+
+  /** Does the log still accept shares? False once it stops, before it retires. */
+  get accepting(): boolean {
+    return this.acceptingShares;
+  }
+
+  /** Has the log retired (its descriptor lists no current key)? */
+  get retired(): boolean {
+    return this.book.retired;
+  }
+
+  /**
+   * Step 1 of retiring (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"): the log accepts no more shares.
+   * onSettled then passes a purchase's response through with no outcome, as a
+   * facilitator without the extension does (the operator also removes
+   * `solidarity` from /supported). A share already held for a
+   * settlement_pending purchase is still processed when the purchase resolves.
+   */
+  stopAccepting(): void {
+    this.acceptingShares = false;
+  }
+
+  /**
+   * Retire the log (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"). It refuses, and changes nothing,
+   * unless every share it accepted is resolved, as collected or uncollected,
+   * nothing is held for a settlement_pending purchase, and the last period in
+   * which it recorded a share has its statement (step 2). Then it stops
+   * accepting shares (step 1, which `stopAccepting` does on its own first),
+   * sets `until` on its key to the last closed period, whose statement is its
+   * final one (step 3), and closes no period after it. Call it once the
+   * cosignatures the log expects are attached to that statement: witnesses
+   * check the key while it is current. `requireCosigners` checks that, each
+   * cosigner named by its exact kid and resolved with `resolveKey`. Returns
+   * the final period.
+   */
+  retire(opts: RetireOptions = {}): string {
+    if (this.book.retired) throw new Error("the log has already retired");
+    if (this.pending.size > 0) throw new Error(`${this.pending.size} share(s) are held for settlement_pending purchases; resolve them first`);
+    const open = [...this.shares.values()].filter((s) => s.state === "queued");
+    if (open.length > 0) throw new Error(`${open.length} share(s) are not resolved yet (collected or uncollected)`);
+    const last = this.book.lastClosed;
+    if (!last) throw new Error("a log retires with a final statement, and this one has published none");
+    const latest = [...this.shares.values()].reduce<string | undefined>((m, s) => (m === undefined || s.period > m ? s.period : m), undefined);
+    if (latest !== undefined && latest > last.period) throw new Error(`${latest} holds shares and has no statement yet`);
+    const final = this.book.retire(opts);
+    this.acceptingShares = false;
+    return final;
   }
 
   /** The five read endpoints under the log's URL ("", "/statements/<p>", "/lines/<p>", "/settlements/<p>", "/proofs/<id>"). */
@@ -781,7 +1000,7 @@ export function purchaseBasis(
     case "upto":
       if (flow === "authorization") basis = asInt(requirements.amount);
       break;
-    // batch-settlement purchases carry no share in draft 2: the server charges each request
+    // batch-settlement purchases carry no share in draft 3: the server charges each request
     // itself, often without calling the facilitator, so the log never sees the charge.
     case "auth-capture":
       if (flow === "authorization" && (ptype === undefined || ptype === "charge")) basis = asInt(settleResponse.amount) ?? asInt(requirements.amount);

@@ -1,5 +1,5 @@
 {
-  "note": "Three chained monthly statements. 2026-10 and 2026-11 are the spec's draft 2 vectors; 2026-12 is the batch from payloads.json. Each is cosigned by the witness (TEST 2); 2026-12 is also cosigned by fund 0x...f00d (TEST 3), whose cosignature attests its settlement references in the simulated chain.",
+  "note": "Three chained monthly statements. 2026-10 and 2026-11 are the spec's vectors (unchanged since draft 2); 2026-12 is the batch from payloads.json. Each is cosigned by the witness (TEST 2); 2026-12 is also cosigned by fund 0x...f00d (TEST 3), whose cosignature attests its settlement references in the simulated chain.",
   "descriptor": {
     "version": 2,
     "log": "https://log.example/solidarity",

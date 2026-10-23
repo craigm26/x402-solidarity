@@ -1,6 +1,6 @@
 # x402 SDK integration kit
 
-This folder wires the draft 2 `solidarity` extension into the official x402 TypeScript SDK, version 2.28.0 (`@x402/core`, `@x402/evm`, and `@x402/fetch` for buyers). Each role adds it in about three lines, and the kit reuses the reference implementation in `../../src/solidarity/`. The one thing the reference gained for the kit is an optional `LogChain.verifyExact`, so the log can check a share with the operator's own scheme code, as the spec says.
+This folder wires the draft 3 `solidarity` extension into the official x402 TypeScript SDK, version 2.28.0 (`@x402/core`, `@x402/evm`, and `@x402/fetch` for buyers). Each role adds it in about three lines, and the kit reuses the reference implementation in `../../src/solidarity/`. The one thing the reference gained for the kit is an optional `LogChain.verifyExact`, so the log can check a share with the operator's own scheme code, as the spec says.
 
 Read this first:
 
@@ -84,7 +84,9 @@ A late decision is still a decision. The share can be accepted after the respons
 
 `facilitatorLogChain(exact)` checks and settles an `exact` share as the spec says: through your existing scheme code, with `paymentPayload = {x402Version: 2, accepted: payment.accepted, payload: payment.payload}` and `paymentRequirements = payment.accepted`. The check is `exact.verify`, so a smart-wallet share (ERC-1271, ERC-6492), the payer's balance and the nonce are checked as for a purchase; a share the payer cannot cover is skipped with `bad-payment`. The transfer is `exact.settle`, after the purchase's response.
 
-If the share's settle comes back `settlement_pending` (its transfer was broadcast and the receipt wait timed out), it is settled again after a wait that grows (5 seconds, doubling, at most 60), and the scheme's pending store re-waits on the same broadcast; nothing is sent twice. The share stays `queued` meanwhile, and `closePeriod` refuses to close its month while it is. Only after the share's `validBefore` has passed (after which an unexecuted authorization can never execute) and `pendingGraceSeconds` more (default 3600) with no receipt is the transfer reported as not made, and then the share is uncollected unless `findExactTransfer` finds it. Set `retryDelayMs` and `pendingGraceSeconds` in `facilitatorLogChain(exact, {...})`.
+If the share's settle comes back `settlement_pending` (its transfer was broadcast and the receipt wait timed out), it is settled again after a wait that grows (5 seconds, doubling, at most 60), and the scheme's pending store re-waits on the same broadcast; nothing is sent twice. The share stays `queued` meanwhile, and `closePeriod` refuses to close its month while it is. Only after the share's `validBefore` has passed (after which an unexecuted authorization can never execute) and `pendingGraceSeconds` more (default 3600) with no receipt is the transfer reported as not made. Set `retryDelayMs` and `pendingGraceSeconds` in `facilitatorLogChain(exact, {...})`.
+
+A transfer reported as not made does not make the share uncollected. Draft 3 forbids that until the share's `validBefore` has passed and the chain shows the authorization unused (solidarity.md, "Share kinds"), so the log reads the chain itself: `authorizationUsed` (USDC's `authorizationState`) and, for an authorization the payer cancelled, `authorizationCanceled` (USDC's `AuthorizationCanceled` event), both passed in `fallback`. Without them the share stays `queued`: `closePeriod` waits for it until 14 days after its month ends, then closes the month without it. Call `log.reconcileExact()` from a timer to look again at such shares; one the log later finds executed (through `findExactTransfer`) is recorded in the month it finds it.
 
 The optional `batch-settlement` share kind needs channel reads and claims that a FacilitatorEvmSigner cannot make; pass them as `facilitatorLogChain(exact, { fallback })`, or leave `batch-settlement` out of your descriptor.
 
@@ -112,7 +114,7 @@ const descriptor = {
 - `funds` is your allow-list. You settle shares only to these.
 - `maxTimeoutSeconds` on the `exact` entry is how long a share stays valid after the purchase's own `validBefore` (the buyer signs `validBefore` = purchase `validBefore` + this). Size it to your settle path: at least twice your signer's receipt timeout plus a minute, because a `settlement_pending` purchase confirms only on the seller's retry, after up to two receipt waits, and the share must still be valid then. `toFacilitatorEvmSigner` waits 180 seconds by default, hence 600 here. With 60, a purchase that confirms on the retry finds its share expired: the buyer is told `bad-payment` and the fund gets nothing (a test shows both).
 - `minAmount` is your lever on gas. You pay the gas for every `exact` share transfer (totals are gross; processor-mode.md, "Fees"), so set it where one transfer is worth it.
-- The key's `kid` is a DID URL on the log's host. Publish the key in a `did:web` document there (or a DNS TXT record), as attestation.md, "Signatures and keys", says. The reference code keeps the key in memory; where it comes from is up to you.
+- The key's `kid` is a DID URL whose DID is exactly `did:web:<the log's host>`, published in that host's root document, `https://<host>/.well-known/did.json`, or a DID named in the TXT record at `_controllers.<host>` (attestation.md, "Signatures and keys"). A `did:web:<host>:<path>` key never authorizes a log statement, even on the log's host. The reference code keeps the key in memory; where it comes from is up to you.
 
 ### 4. Serve it
 
@@ -155,7 +157,11 @@ At the start of each month, close the previous one:
 const statement = await log.closePeriod("2026-10");
 ```
 
-It claims what it is owed on any `batch-settlement` channels, builds the batch (an RFC 6962 tree over the sorted lines), writes the settlements file and signs a statement chained to the previous month. Witnesses and the fund then cosign it, and you add their cosignatures with `log.addCosignature(period, envelope)`. Owners check their shares with `/proofs/<id>` and the statement. `test/e2e.test.ts` does this with a mocked clock and verifies a receipt.
+It claims what it is owed on any `batch-settlement` channels, looks again at `exact` shares whose transfer is not final, builds the batch (an RFC 6962 tree over the sorted lines), writes the settlements file and signs a statement chained to the previous month. Witnesses and the fund then cosign it, and you add their cosignatures with `log.addCosignature(period, envelope)`. Owners check their shares with `/proofs/<id>` and the statement. `test/e2e.test.ts` does this with a mocked clock and verifies a receipt.
+
+A log issues one payload per period, ever (attestation.md, "Statements"). Pass `persistStatement` to `SolidarityLog` to store each statement before it is published, and after a restart close the month again with the stored statement (`closePeriod(period, issuedAt, { signed })`), never a new one.
+
+To stop for good (attestation.md, "Retiring a log"): `log.stopAccepting()` and remove the extension from `/supported`, let every share resolve and close the months that hold them, then, once the final statement carries the cosignatures you expect, `log.retire({ requireCosigners, resolveKey })`. That sets `until` on the log's key; the log closes nothing after it and keeps serving what it published.
 
 ### Operating rules
 
@@ -256,7 +262,7 @@ A real deployment would still need:
 - **A real fund** that has agreed to receive shares, on your allow-list, and that cosigns the statements naming it (attestation.md, "Witnesses and the fund"). None exists today.
 - **Keys:** the log's statement key in a secret store, published in a `did:web` document or DNS, and a facilitator signer with gas for every share transfer.
 - **Witnesses** that check and cosign each month's statement.
-- **`findExactTransfer`**, an RPC client reading `AuthorizationUsed` and `Transfer` events, passed as `fallback`. Without it, a share someone else submitted first, or one whose receipt never came within `pendingGraceSeconds` after its `validBefore`, is reported uncollected. (Balances, nonce state and smart-wallet signatures are checked by your scheme's verify through `facilitatorLogChain`; the reference code alone checks EOA signatures offline.)
+- **`findExactTransfer`, `authorizationUsed` and `authorizationCanceled`**, from an RPC client reading `AuthorizationUsed`, `Transfer` and `AuthorizationCanceled` events and `authorizationState`, passed as `fallback`. Without `findExactTransfer`, a share someone else submitted first, or one whose receipt never came within `pendingGraceSeconds` after its `validBefore`, is never seen collected. Without the other two, a share whose transfer did not run is never reported uncollected and stays `queued`. (Balances, nonce state and smart-wallet signatures are checked by your scheme's verify through `facilitatorLogChain`; the reference code alone checks EOA signatures offline.)
 - **Storage** for lines, held shares, channel state and published statements.
 - **Answers to the regulatory questions** in processor-mode.md, "Open questions" 3: passing other people's money to a third-party fund can be money transmission or remittance, and can need charitable-solicitation registration. Nothing here answers them.
 
