@@ -603,12 +603,11 @@ export class Engine {
   }
 
   private async afterError(e: unknown): Promise<void> {
-    // Only a purchase that was under way counts toward the backoff, and a transfer that is
-    // only not readable yet does not: neither an RPC error before signing nor a close does.
-    const counts = this.current !== undefined && !(e instanceof NotYet);
+    // Failures count toward the backoff once per purchase, at its cycle-end (runCycle), never
+    // here: an error while a purchase is under way leaves it unfinished, and an unfinished cycle
+    // already stops any new purchase until it is resumed and ended.
     try {
       this.store.setStatus("lastError", { at: this.io.now(), error: briefError(e) });
-      if (counts) this.bumpFailures(false);
     } catch {
       // the store itself failed; the rebuild below will say so
     }
@@ -625,6 +624,7 @@ export class Engine {
   private bumpFailures(ok: boolean): void {
     if (ok) {
       this.store.setStatus("failures", 0);
+      if (this.store.status("backoffUntil") !== undefined) this.store.setStatus("backoffUntil", 0);
       return;
     }
     const n = Number(this.store.status("failures") ?? 0) + 1;
@@ -730,6 +730,8 @@ export class Engine {
     });
     this.cycles = n;
     this.unfinished = row;
+    // Written before the purchase is settled, so a tick that throws from here on is shown as this cycle under way.
+    this.store.setStatus("lastTick", { at: now, stop: null, cycle: n, notes: [] });
     await this.store.sync();
     await this.armAlarm(row.body.share.validBefore + FINAL_AFTER);
     const summary = await this.runCycle(row, true);
