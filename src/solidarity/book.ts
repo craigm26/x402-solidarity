@@ -6,7 +6,7 @@
  */
 
 import type { Batch, SigningKey } from "./ledger.ts";
-import { buildBatch, buildReceipt, fileBody, settlementsMatchTotals, signStatement, statementHash, statementPayload } from "./ledger.ts";
+import { buildBatch, buildReceipt, decodeStatement, fileBody, jwsVerify, settlementsMatchTotals, signStatement, statementBytes, statementHash, statementPayload } from "./ledger.ts";
 import type { JwsEnvelope, LogDescriptor, PublishedStatement, Receipt, StatementPayload } from "./types.ts";
 import { nextPeriod, periodStart } from "./utils.ts";
 
@@ -69,8 +69,15 @@ export class LogBook {
    * Close a period: one batch of `lines`, the settlements file, and a statement
    * signed with the log's key, chained to the previous period's payload.
    * Every period gets a statement, including an empty one, so a gap is visible.
+   *
+   * `signed` is for a log that rebuilds its book from stored records: the
+   * statement it signed and published before. The payload is built exactly as
+   * without it, and the stored JWS is used only if it is by this log's key
+   * (same kid, valid signature) and over exactly these payload bytes; anything
+   * else throws before the period is closed. The private key is not used, and
+   * the published statement is byte for byte the one stored.
    */
-  close(period: string, lines: string[], issuedAt?: number): PublishedStatement {
+  close(period: string, lines: string[], issuedAt?: number, signed?: JwsEnvelope): PublishedStatement {
     if (this.closed.has(period)) throw new Error(`${period} is already closed`);
     if (this.last && period !== nextPeriod(this.last.period)) throw new Error(`the next statement must be for ${nextPeriod(this.last.period)}`);
     if (!this.last && this.earliest !== undefined && period > this.earliest) throw new Error(`the first statement must be for ${this.earliest} or earlier`);
@@ -88,10 +95,20 @@ export class LogBook {
       previous: this.last?.hash ?? null,
       issuedAt: issuedAt ?? periodStart(nextPeriod(period)),
     });
-    const pub = signStatement(payload, this.key);
+    const pub = signed ? this.storedStatement(payload, signed) : signStatement(payload, this.key);
     this.closed.set(period, { payload, pub, batch, lines: linesBody, settlements: settlementsBody });
     this.last = { period, hash: statementHash(payload) };
     return pub;
+  }
+
+  /** The stored statement, checked against the payload this book built. */
+  private storedStatement(payload: StatementPayload, signed: JwsEnvelope): PublishedStatement {
+    if (signed?.format !== "jws" || typeof signed.signature !== "string") throw new Error("the stored statement is not a JWS envelope");
+    const d = decodeStatement(signed);
+    if (d.kid !== this.key.kid) throw new Error(`the stored statement is signed by ${d.kid}, not ${this.key.kid}`);
+    if (!jwsVerify(signed.signature, this.key.publicKey)) throw new Error("the stored statement's signature does not verify with the log's key");
+    if (Buffer.compare(Buffer.from(d.bytes), Buffer.from(statementBytes(payload))) !== 0) throw new Error("the stored statement is over another payload");
+    return { statement: { format: "jws", signature: signed.signature }, cosignatures: [] };
   }
 
   addCosignature(period: string, cosignature: JwsEnvelope): void {

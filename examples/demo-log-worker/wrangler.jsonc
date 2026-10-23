@@ -1,0 +1,30 @@
+{
+  // The solidarity demo log (README.md). Every 6 hours it buys 1 test USDC from itself on
+  // Base Sepolia, a testnet whose USDC has no value, and its log settles a 0.001 USDC share
+  // to the placeholder fund 0x...f00d, which nobody controls. The log, a demo witness and a
+  // demo fund key all live in one Durable Object.
+  //
+  // PAYER_KEY is a secret (npx wrangler secret put PAYER_KEY). Never put it here.
+  "name": "solidarity-demo-log",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "LOG", "class_name": "DemoLogObject" }]
+  },
+  // Never rename or delete this class: its storage holds the log's records and keys.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DemoLogObject"] }],
+  // One tick every 6 hours. The 00:00 UTC tick on the 1st closes the month before.
+  "triggers": { "crons": ["0 */6 * * *"] },
+  "vars": {
+    "MODE": "live",
+    "PUBLIC_ORIGIN": "https://solidarity-demo-log.craigm26.workers.dev",
+    "PAYER_ADDRESS": "0x425c543799fe6452BfCfc3197ccD249b4989ad0B",
+    "FACILITATOR_URL": "https://x402.org/facilitator",
+    "RPC_URL": "https://sepolia.base.org",
+    "END_DATE": "2027-03-31",
+    "PAUSED": "0"
+  },
+  "observability": { "enabled": true }
+}

@@ -39,15 +39,17 @@ test("live example: refuses without PRIVATE_KEY and RPC_URL (checked without run
 const TEXT_FILES = (dir: string): string[] =>
   readdirSync(dir).flatMap((name) => {
     const p = join(dir, name);
-    if (["node_modules", ".git"].includes(name)) return [];
+    if (["node_modules", ".git", ".wrangler"].includes(name)) return [];
     if (statSync(p).isDirectory()) return TEXT_FILES(p);
-    return /\.(ts|md|json|txt)$/.test(name) || ["LICENSE", "NOTICE"].includes(name) ? [p] : [];
+    return /\.(ts|md|json|jsonc|txt|html)$/.test(name) || ["LICENSE", "NOTICE"].includes(name) ? [p] : [];
   });
 
 const DASHES = new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]`);
 
 test("no em or en dashes anywhere in the repository's text", () => {
-  for (const f of TEXT_FILES(ROOT)) {
+  const files = TEXT_FILES(ROOT);
+  assert.ok(files.some((f) => f.endsWith("wrangler.jsonc")), "the scan covers .jsonc");
+  for (const f of files) {
     const s = readFileSync(f, "utf8");
     assert.ok(!DASHES.test(s), `${relative(ROOT, f)} contains an em or en dash`);
   }

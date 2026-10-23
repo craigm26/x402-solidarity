@@ -1,3 +1,5 @@
 node_modules/
 site/
 .wrangler/
+.dev.vars
+.dev.vars.*

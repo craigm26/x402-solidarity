@@ -327,3 +327,66 @@ test("verifyReceipt and verifyChain report malformed input as problems instead o
   assert.equal(chain?.ok, false);
   assert.match(chain?.problems.join(" ") ?? "", /statement 1/);
 });
+
+test("a book rebuilt from stored records re-adds the stored statement byte for byte, and refuses one that does not match", () => {
+  const LOG = "https://log.example/solidarity";
+  const FUND = "eip155:84532:0x000000000000000000000000000000000000f00d";
+  const USDC = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+  const key = S.generateSigningKey("EdDSA", "did:web:log.example#log-1");
+  const other = S.generateSigningKey("EdDSA", "did:web:log.example#log-1");
+  const descriptor = { version: 2 as const, log: LOG, funds: [FUND], keys: [{ kid: key.kid, from: "2026-10", until: null }] };
+  const lines = [1, 2].map((i) => S.formatLine({ period: "2026-10", fund: FUND, asset: USDC, id: `stored-share-${String(i).padStart(10, "0")}`, amount: "1000" }));
+  const fill = (b: S.LogBook) => lines.forEach((_, i) => b.addSettlement("2026-10", S.formatSettlement({ fund: FUND, asset: USDC, ref: `exact:0x${String(i + 1).repeat(64)}`, amount: "1000" })));
+  const issuedAt = 1793491200;
+  const live = new S.LogBook(descriptor, key);
+  fill(live);
+  const pub = live.close("2026-10", lines, issuedAt);
+
+  // The private key is never read when the stored JWS is given.
+  let reads = 0;
+  const guarded = { alg: key.alg, kid: key.kid, publicKey: key.publicKey, get privateKey() { reads++; return key.privateKey; } };
+  const rebuilt = new S.LogBook(descriptor, guarded);
+  fill(rebuilt);
+  const again = rebuilt.close("2026-10", lines, issuedAt, pub.statement);
+  assert.equal(JSON.stringify(again), JSON.stringify(pub));
+  assert.equal(reads, 0);
+  assert.equal(rebuilt.lastClosed?.hash, live.lastClosed?.hash);
+
+  const fresh = () => {
+    const b = new S.LogBook(descriptor, key);
+    fill(b);
+    return b;
+  };
+  const refuses = (b: S.LogBook, ls: string[], at: number, env: S.JwsEnvelope, why: RegExp) => {
+    assert.throws(() => b.close("2026-10", ls, at, env), why);
+    assert.equal(b.get("2026-10"), undefined, "the period stays open");
+  };
+  const b1 = fresh();
+  refuses(b1, [lines[0]], issuedAt, pub.statement, /add up|another payload/);
+  refuses(b1, lines, issuedAt + 1, pub.statement, /another payload/);
+  refuses(b1, lines, issuedAt, S.signStatement(S.decodeStatement(pub.statement).payload, other).statement, /does not verify/);
+  refuses(b1, lines, issuedAt, S.signStatement(S.decodeStatement(pub.statement).payload, S.generateSigningKey("EdDSA", "did:web:log.example#log-2")).statement, /signed by/);
+  refuses(b1, lines, issuedAt, { format: "jws", signature: `${pub.statement.signature.slice(0, -4)}AAAA` }, /does not verify/);
+  // After the refusals the book closes normally.
+  assert.equal(JSON.stringify(b1.close("2026-10", lines, issuedAt, pub.statement)), JSON.stringify(pub));
+});
+
+test("closePeriod with a stored statement: same payload and bytes, no signing", async () => {
+  const LOG = "https://log.example/solidarity";
+  const descriptor = { version: 2 as const, log: LOG, funds: ["eip155:84532:0x000000000000000000000000000000000000f00d"], keys: [{ kid: "did:web:log.example#log-1", from: "2026-10", until: null }] };
+  const key = S.generateSigningKey("EdDSA", "did:web:log.example#log-1");
+  const chain = { submitExact: async () => ({ ok: false as const, error: "unused" }), channelState: () => undefined, claim: async () => ({ ok: false as const, error: "unused" }) };
+  const now = 1793577600; // 2026-11-02
+  const a = new S.SolidarityLog({ descriptor, key, chain, clock: () => now });
+  const pub = await a.closePeriod("2026-10", now);
+  let reads = 0;
+  const guarded = { alg: key.alg, kid: key.kid, publicKey: key.publicKey, get privateKey() { reads++; return key.privateKey; } };
+  const b = new S.SolidarityLog({ descriptor, key: guarded, chain, clock: () => now });
+  const again = await b.closePeriod("2026-10", now, { signed: pub.statement });
+  assert.equal(JSON.stringify(again), JSON.stringify(pub));
+  assert.equal(reads, 0);
+  assert.equal(b.handle("/statements/2026-10").body, a.handle("/statements/2026-10").body);
+  const c = new S.SolidarityLog({ descriptor, key, chain, clock: () => now });
+  await assert.rejects(() => c.closePeriod("2026-10", now - 1, { signed: pub.statement }), /another payload/);
+  assert.equal(c.handle("/statements/2026-10").status, 404);
+});

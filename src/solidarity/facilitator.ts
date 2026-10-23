@@ -685,8 +685,13 @@ export class SolidarityLog {
    * the log lowers that channel's chargedCumulativeAmount to what it has
    * claimed, as for a channel that can no longer pay. One stuck claim can then
    * never hold back P's statement, or every statement after it.
+   *
+   * `opts.signed` is the statement this log signed for P before, for a log
+   * that rebuilds itself from stored records: see LogBook.close. With it the
+   * log's private key is not used, and the statement is byte for byte the
+   * stored one, or closing throws and P stays open.
    */
-  async closePeriod(period: string, issuedAt?: number): Promise<PublishedStatement> {
+  async closePeriod(period: string, issuedAt?: number, opts: { signed?: JwsEnvelope } = {}): Promise<PublishedStatement> {
     const now = this.clock();
     if (period >= periodOf(now)) throw new Error(`cannot close ${period} before it ends`);
     const next = this.book.nextToClose;
@@ -700,7 +705,7 @@ export class SolidarityLog {
     }
     // Uncollected shares are removed before the tree is built.
     const lines = inPeriod.filter((s) => s.state === "collected").map((s) => s.line);
-    return this.book.close(period, lines, issuedAt ?? Math.max(now, periodStart(nextPeriod(period))));
+    return this.book.close(period, lines, issuedAt ?? Math.max(now, periodStart(nextPeriod(period))), opts.signed);
   }
 
   private async giveUp(stuck: ShareRecord[]): Promise<void> {

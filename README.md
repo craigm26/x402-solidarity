@@ -7,8 +7,9 @@ Please read this first:
 - **A proposal.** It is not part of x402 or any other protocol, and it has not been reviewed or endorsed by their maintainers.
 - **Not affiliated.** It is not affiliated with or endorsed by any company, the UN or any fund. I take no money from it.
 - **No fund exists.** Every fund address here is a placeholder (`0x...f00d`, `0x...beef`).
-- **Simulated.** Everything except the one testnet run below is tested offline against a simulated chain. No money moves: test USDC has no value.
+- **Simulated.** Everything except the testnet runs below is tested offline against a simulated chain. No money moves: test USDC has no value.
 - **One live script, run once on Base Sepolia.** `examples/live-base-sepolia/` settles a purchase and its share on Base Sepolia, testnet only, with test USDC that has no value. On 2026-10-22 it settled a 1 USDC [purchase](https://sepolia.basescan.org/tx/0x28b37a956391981ab4e11c313b9454d24bf7469364a6f9de071a544fb4bbab5c) (to the payer itself) and then its 0.001 USDC [share](https://sepolia.basescan.org/tx/0xd1e4a7fb3152953a4ddcec9daeb49b09edff94074e3eb69c6c976bda37002a70) to the placeholder fund, both through the public x402.org facilitator. Its `SIMULATE=1` mode checks both transfers against the deployed USDC contract with `eth_call` and sends nothing, and a test also checks five ways it must fail.
+- **A demo log Worker, not deployed.** `examples/demo-log-worker/` runs a log on its own in a Cloudflare Durable Object: every 6 hours it buys 1 test USDC from itself on Base Sepolia, its log settles the 0.001 USDC share to the placeholder fund, and each month a demo witness and a demo fund key, both held by the same Worker, cosign the statement. Under `wrangler dev` on 2026-10-23 it ran two real cycles on Base Sepolia, recorded only in a local dev log that was never published; its README lists them.
 - **Written with AI assistance** (Claude Code).
 
 The proposal and its simulated demos live at https://craigmerry.com/solidarity-levy/. The spec (draft 2, 2026-10-22) is the source of truth; where this code and the spec disagree, the spec wins and the code has a bug. It is three documents:
@@ -36,6 +37,8 @@ cd integrations/x402-sdk
 npm install
 npm test
 ```
+
+`npm test` also runs the demo log Worker's offline tests (`examples/demo-log-worker/test/`), which need no network and no wrangler.
 
 It also runs in Cloudflare Workers with the `nodejs_compat` flag. Signing never hands node:crypto a `{ key, dsaEncoding }` options object, which workerd rejects for KeyObjects; ES256 converts between DER and the JWS r||s form itself. To check a Workers build, run `npx wrangler dev` in `examples/cloudflare-worker/`, then `node examples/cloudflare-worker/check.ts http://127.0.0.1:8787`: signatures made in workerd must verify in Node, signatures made in Node must verify in workerd, and tampered ones must fail in both.
 
@@ -80,7 +83,8 @@ src/solidarity/       the extension, laid out like @x402/extensions/payment-iden
   processor.ts        processor mode (card and bank rails), as bookkeeping only
 src/sim/chain.ts      the simulated chain: USDC with EIP-3009, a batch-settlement escrow
 conformance/          JSON test vectors for other implementations (see below)
-examples/             the offline flow, the Base Sepolia script (simulate, facilitator or RPC), and a Cloudflare Workers check
+examples/             the offline flow, the Base Sepolia script (simulate, facilitator or RPC), a Cloudflare Workers check,
+                      and a demo log Worker (a Durable Object that runs a log on Base Sepolia by itself)
 integrations/x402-sdk/  a kit that wires the extension into the x402 TypeScript SDK 2.28.0, with its own package.json and README
 scripts/              the conformance generator
 test/                 node:test suites
@@ -130,7 +134,7 @@ USDC on Base Sepolia is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, with EIP-7
 - It does not resolve `did:web` or DNS keys. Verifiers pass a key resolver, which stands for that lookup and so answers for the current key only. A retired key is taken from the descriptor's `jwk`, and only with a cosignature the verifier requires.
 - It refuses `batch-settlement` channels whose `payerAuthorizer` is zero. For those the contract checks the payer's signature with EIP-1271 when the payer has code, which this offline check cannot do, so a voucher that looks valid here could make every claim revert.
 - On Base Sepolia, `findExactTransfer` (a share whose authorization someone else submitted first) searches only the last 2,000 blocks, about an hour, in 200-block requests because public RPC endpoints limit `eth_getLogs`. A transfer older than that is reported uncollected.
-- It does not serve HTTP or persist anything. The log's five endpoints are a function over memory.
+- The library does not serve HTTP or persist anything: the log's five endpoints are a function over memory. `examples/demo-log-worker/` shows one way to do both, in a Durable Object that records every step and rebuilds the log by replaying the records. For that, `closePeriod(period, issuedAt, {signed})` (and `LogBook.close` with a stored JWS) re-adds a statement signed before, after checking it is the log key's signature over exactly the payload it rebuilt, so replay never signs and published statements stay byte for byte the same.
 - Processor mode is arithmetic and bookkeeping only. It charges no one and pays no one.
 - No consistency proofs: `attestation.md` closes every batch for good, so it does not need them.
 

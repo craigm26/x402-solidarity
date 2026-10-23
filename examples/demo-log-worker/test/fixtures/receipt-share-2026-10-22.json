@@ -1,0 +1,30 @@
+{
+  "source": "eth_getTransactionReceipt from https://sepolia.base.org on 2026-10-22, for the share transfer settled by examples/live-base-sepolia on 2026-10-22 (Base Sepolia, test USDC, no value)",
+  "receipt": {
+    "transactionHash": "0xd1e4a7fb3152953a4ddcec9daeb49b09edff94074e3eb69c6c976bda37002a70",
+    "status": "0x1",
+    "blockNumber": "0x2eb6e83",
+    "logs": [
+      {
+        "address": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        "topics": [
+          "0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5",
+          "0x000000000000000000000000425c543799fe6452bfcfc3197ccd249b4989ad0b",
+          "0x6ead12564542cfa94afa6b91c0c932a8c20041aa74d73356bdd8818c6bbd18c7"
+        ],
+        "data": "0x",
+        "logIndex": "0x0"
+      },
+      {
+        "address": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x000000000000000000000000425c543799fe6452bfcfc3197ccd249b4989ad0b",
+          "0x000000000000000000000000000000000000000000000000000000000000f00d"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "logIndex": "0x1"
+      }
+    ]
+  }
+}

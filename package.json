@@ -10,7 +10,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts examples/demo-log-worker/test/*.test.ts",
     "vectors": "node scripts/generate-conformance.ts",
     "e2e": "node examples/e2e-offline.ts"
   },
