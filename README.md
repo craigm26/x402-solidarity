@@ -29,6 +29,14 @@ npm test
 node examples/e2e-offline.ts
 ```
 
+The integration kit for the x402 TypeScript SDK has its own exact-pinned dependencies and its own tests, which the root `npm test` does not run. After `npm install` in the root:
+
+```
+cd integrations/x402-sdk
+npm install
+npm test
+```
+
 It also runs in Cloudflare Workers with the `nodejs_compat` flag. Signing never hands node:crypto a `{ key, dsaEncoding }` options object, which workerd rejects for KeyObjects; ES256 converts between DER and the JWS r||s form itself. To check a Workers build, run `npx wrangler dev` in `examples/cloudflare-worker/`, then `node examples/cloudflare-worker/check.ts http://127.0.0.1:8787`: signatures made in workerd must verify in Node, signatures made in Node must verify in workerd, and tampered ones must fail in both.
 
 `npm test` runs every test with `node:test`. A few cross-checks need files from outside this repository. They read only the two environment variables below, with no default paths, and without them they skip and say which variable to set:
@@ -73,6 +81,7 @@ src/solidarity/       the extension, laid out like @x402/extensions/payment-iden
 src/sim/chain.ts      the simulated chain: USDC with EIP-3009, a batch-settlement escrow
 conformance/          JSON test vectors for other implementations (see below)
 examples/             the offline flow, the Base Sepolia script (simulate, facilitator or RPC), and a Cloudflare Workers check
+integrations/x402-sdk/  a kit that wires the extension into the x402 TypeScript SDK 2.28.0, with its own package.json and README
 scripts/              the conformance generator
 test/                 node:test suites
 ```

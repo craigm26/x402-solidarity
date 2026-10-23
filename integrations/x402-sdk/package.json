@@ -1,0 +1,22 @@
+{
+  "name": "x402-solidarity-sdk-kit",
+  "version": "0.1.0",
+  "description": "Integration kit: the draft 2 solidarity extension wired into the x402 TypeScript SDK 2.28.0 (client, resource server, facilitator). A proposal, simulated; no fund exists.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.ts"
+  },
+  "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
+    "viem": "2.48.11"
+  },
+  "devDependencies": {
+    "@x402/fetch": "2.28.0"
+  }
+}
