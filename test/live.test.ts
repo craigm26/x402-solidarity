@@ -9,6 +9,9 @@ import { checkEnv } from "../examples/live-base-sepolia/env.ts";
 import { FacilitatorLogChain } from "../examples/live-base-sepolia/facilitatorChain.ts";
 import type { Fetch } from "../examples/live-base-sepolia/facilitatorChain.ts";
 import { mappingSlot, simulateExactTransfer } from "../examples/live-base-sepolia/simulate.ts";
+import { findExactTransferOnChain } from "../examples/live-base-sepolia/findTransfer.ts";
+import type { LookupClient } from "../examples/live-base-sepolia/findTransfer.ts";
+import { keccak256, toHex } from "viem";
 import type { CallClient } from "../examples/live-base-sepolia/simulate.ts";
 
 /** A Base Sepolia RPC endpoint, for the checks against the deployed USDC contract: BASE_SEPOLIA_RPC_URL only, no default. */
@@ -103,4 +106,58 @@ test("against the deployed USDC on Base Sepolia: a signed share executes, and a 
   const now = Math.floor(Date.now() / 1000);
   const expired = await S.signEip3009(account, accepted, { validAfter: String(now - 600), validBefore: String(now - 300) });
   assert.equal((await simulateExactTransfer(client, accepted, expired)).ok, false, "an expired authorization must fail");
+});
+
+// ---- findExactTransfer on a live chain (findTransfer.ts) ----------------------------------------
+
+const AUTH_USED = keccak256(toHex("AuthorizationUsed(address,bytes32)"));
+const TRANSFER = keccak256(toHex("Transfer(address,address,uint256)"));
+const pad = (a: string) => `0x${a.slice(2).toLowerCase().padStart(64, "0")}` as `0x${string}`;
+
+test("findExactTransfer: an unused nonce asks nothing more; a used one is matched to the Transfer right after its AuthorizationUsed", async () => {
+  const account = privateKeyToAccount(generatePrivateKey());
+  const accepted = requirements(FUND, "1000");
+  const payload = await S.signEip3009(account, accepted, window());
+  const calls: string[] = [];
+  const fake = (o: { used: boolean; logs?: unknown[]; status?: "success" | "reverted"; receiptLogs?: unknown[] }): LookupClient => ({
+    readContract: async () => (calls.push("authorizationState"), o.used),
+    getBlockNumber: async () => (calls.push("blockNumber"), 1000n),
+    request: async (a) => (calls.push(`getLogs ${(a.params[0] as { fromBlock: string }).fromBlock}-${(a.params[0] as { toBlock: string }).toBlock}`), (o.logs ?? []) as never),
+    getTransactionReceipt: async () => (calls.push("receipt"), { status: o.status ?? "success", logs: (o.receiptLogs ?? []) as never }),
+  });
+  const hash = `0x${"cd".repeat(32)}` as const;
+  const transfer = (from: string, to: string, value: bigint, logIndex: number) => ({ address: USDC.address, topics: [TRANSFER, pad(from), pad(to)], data: toHex(value, { size: 32 }), logIndex, transactionHash: hash });
+
+  assert.equal(await findExactTransferOnChain(fake({ used: false }), accepted, payload), undefined);
+  assert.deepEqual(calls, ["authorizationState"], "an unused nonce: no log search at all");
+
+  calls.length = 0;
+  const found = fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], receiptLogs: [transfer(account.address, "0x00000000000000000000000000000000000000aa", 7n, 2), transfer(account.address, FUND, 1000n, 5)] });
+  assert.deepEqual(await findExactTransferOnChain(found, accepted, payload, { lookbackBlocks: 500n }), { transaction: hash, token: USDC.address, to: "0x000000000000000000000000000000000000F00D", value: 1000n });
+  assert.deepEqual(calls.filter((c) => c.startsWith("getLogs")), ["getLogs 0x321-0x3e8"], "found in the first 200-block chunk, walking back from the latest block");
+
+  calls.length = 0;
+  await findExactTransferOnChain(fake({ used: true, logs: [] }), accepted, payload, { lookbackBlocks: 500n });
+  assert.deepEqual(calls.filter((c) => c.startsWith("getLogs")), ["getLogs 0x321-0x3e8", "getLogs 0x259-0x320", "getLogs 0x1f4-0x258"], "three chunks cover 500 blocks, never more than 200 each");
+
+  assert.equal(await findExactTransferOnChain(fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], status: "reverted", receiptLogs: [transfer(account.address, FUND, 1000n, 5)] }), accepted, payload), undefined, "a reverted transaction moved nothing");
+  assert.equal(await findExactTransferOnChain(fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], receiptLogs: [transfer("0x00000000000000000000000000000000000000bb", FUND, 1000n, 5)] }), accepted, payload), undefined, "a Transfer from someone else is not this authorization's");
+  assert.equal(await findExactTransferOnChain(fake({ used: true, logs: [{ transactionHash: hash, logIndex: "0x4" }], receiptLogs: [transfer(account.address, FUND, 1000n, 2)] }), accepted, payload), undefined, "only the Transfer right after AuthorizationUsed counts");
+});
+
+test("findExactTransfer against Base Sepolia: finds the 2026-10-22 share, and nothing for an unused nonce", { skip: NEEDS_RPC }, async () => {
+  const client = createPublicClient({ chain: baseSepolia, transport: http(RPC) });
+  const share = "0xd1e4a7fb3152953a4ddcec9daeb49b09edff94074e3eb69c6c976bda37002a70";
+  const r = await client.getTransactionReceipt({ hash: share });
+  const au = r.logs.find((l) => l.topics[0] === AUTH_USED);
+  assert.ok(au, "the share's transaction emitted AuthorizationUsed");
+  const from = `0x${(au.topics[1] as string).slice(-40)}`;
+  const nonce = au.topics[2] as `0x${string}`;
+  const accepted = requirements(FUND, "1000");
+  const payload = { signature: "0x" as const, authorization: { from, to: FUND, value: "1000", validAfter: "0", validBefore: "0", nonce } };
+  const lookup = client as unknown as LookupClient;
+  const window = { fromBlock: r.blockNumber - 100n, toBlock: r.blockNumber + 99n };
+  assert.deepEqual(await findExactTransferOnChain(lookup, accepted, payload, window), { transaction: share, token: USDC.address, to: "0x000000000000000000000000000000000000F00D", value: 1000n });
+  const unused = { ...payload, authorization: { ...payload.authorization, nonce: keccak256(toHex(`unused ${Date.now()}`)) } };
+  assert.equal(await findExactTransferOnChain(lookup, accepted, unused, window), undefined);
 });

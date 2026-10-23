@@ -4,9 +4,8 @@
  * transferWithAuthorization to the USDC contract, the same call the x402
  * exact facilitator makes (the v, r, s variant of the function, from
  * eip3009ABI in typescript/packages/mechanisms/evm/src/constants.ts).
- * batch-settlement channels and claims are not wired up in this example, and
- * neither is the optional findExactTransfer: a share whose authorization
- * someone else submitted first is reported uncollected here.
+ * batch-settlement channels and claims are not wired up in this example. The
+ * optional findExactTransfer is added by withExactLookup (findTransfer.ts).
  *
  * Not yet run against a live chain (the live run on 2026-10-22 used
  * FacilitatorLogChain). SIMULATE=1 in index.ts checks the same

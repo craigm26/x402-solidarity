@@ -28,6 +28,7 @@ import * as S from "../../src/solidarity/index.ts";
 import type { LogChain, LogDescriptor, OwnerPolicy, PaymentPayload, PaymentRequirements } from "../../src/solidarity/index.ts";
 import { checkEnv } from "./env.ts";
 import { FacilitatorLogChain } from "./facilitatorChain.ts";
+import { withExactLookup } from "./findTransfer.ts";
 import { RpcLogChain } from "./rpcChain.ts";
 import { simulateExactTransfer } from "./simulate.ts";
 
@@ -95,9 +96,11 @@ if (env.simulate) {
   process.exit(failed ? 1 : 0);
 }
 
-const chain: LogChain = env.facilitatorUrl
-  ? new FacilitatorLogChain(env.facilitatorUrl)
-  : new RpcLogChain(publicClient, createWalletClient({ account, chain: baseSepolia, transport: http(env.rpcUrl) }));
+// Either way, the log can find a share someone else submitted first (findTransfer.ts).
+const chain: LogChain = withExactLookup(
+  env.facilitatorUrl ? new FacilitatorLogChain(env.facilitatorUrl) : new RpcLogChain(publicClient, createWalletClient({ account, chain: baseSepolia, transport: http(env.rpcUrl) })),
+  publicClient as unknown as Parameters<typeof withExactLookup>[1],
+);
 console.log(env.facilitatorUrl ? `Settling through ${env.facilitatorUrl} (it pays the gas).` : "Submitting from the key's own account (it pays the gas).");
 
 // The purchase settles first, exactly as it would without the extension.

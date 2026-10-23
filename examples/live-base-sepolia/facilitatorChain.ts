@@ -9,7 +9,8 @@
  * only the token.
  *
  * Only `exact` is wired up here; batch-settlement channels and claims are
- * not, and neither is findExactTransfer.
+ * not. The optional findExactTransfer is added by withExactLookup
+ * (findTransfer.ts), which reads the chain through an RPC endpoint.
  */
 
 import type { ExactEip3009Payload, LogChain, PaymentRequirements, VoucherFields } from "../../src/solidarity/index.ts";

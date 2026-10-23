@@ -129,7 +129,7 @@ USDC on Base Sepolia is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, with EIP-7
 - It does not open batch-settlement channels. As `attestation.md` says, the channel is funded outside the extension, and a share with a `deposit` payload is skipped with `bad-payment`.
 - It does not resolve `did:web` or DNS keys. Verifiers pass a key resolver, which stands for that lookup and so answers for the current key only. A retired key is taken from the descriptor's `jwk`, and only with a cosignature the verifier requires.
 - It refuses `batch-settlement` channels whose `payerAuthorizer` is zero. For those the contract checks the payer's signature with EIP-1271 when the payer has code, which this offline check cannot do, so a voucher that looks valid here could make every claim revert.
-- The Base Sepolia script's two chains (RPC and facilitator) do not implement `findExactTransfer`, so there a share whose authorization someone else submitted first is reported uncollected. The simulated chain implements it.
+- On Base Sepolia, `findExactTransfer` (a share whose authorization someone else submitted first) searches only the last 2,000 blocks, about an hour, in 200-block requests because public RPC endpoints limit `eth_getLogs`. A transfer older than that is reported uncollected.
 - It does not serve HTTP or persist anything. The log's five endpoints are a function over memory.
 - Processor mode is arithmetic and bookkeeping only. It charges no one and pays no one.
 - No consistency proofs: `attestation.md` closes every batch for good, so it does not need them.
