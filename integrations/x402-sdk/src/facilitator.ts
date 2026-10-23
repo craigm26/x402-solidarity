@@ -278,6 +278,8 @@ export function solidarityFacilitator(opts: SolidarityFacilitatorOptions): Solid
     try {
       const key = ctx.paymentPayload;
       let outcome = isObject(key) ? decided.get(key) : undefined;
+      // A recorded `pending` answers only a result that is still pending; a final result goes back to the log.
+      if (outcome && (await outcome)?.status === "pending" && !isPending(result)) outcome = undefined;
       if (!outcome) {
         // Recorded before the log runs, so even a log that throws is not asked twice about one settle.
         const work = process(ctx.paymentPayload, ctx.requirements, result).then((r) => r.outcome);

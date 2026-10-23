@@ -76,7 +76,7 @@ const log = new SolidarityLog({ descriptor, key, chain: facilitatorLogChain(exac
 const solidarity = attachSolidarity(facilitator, { log, onError: (e, where) => console.error("solidarity", where, e) });
 ```
 
-`attachSolidarity` does two things: `facilitator.registerExtension(...)`, so `/supported` lists `"solidarity"`, and `facilitator.onAfterSettle(...)`, which hands each settled purchase to the log. It registers nothing on `/verify`: the purchase is verified exactly as without the extension, and a test checks that the VerifyResponse is identical with and without a share, with no chain writes.
+`attachSolidarity` does three things: `facilitator.registerExtension(...)`, so `/supported` lists `"solidarity"`; `facilitator.onAfterSettle(...)`, which hands each settled purchase to the log; and `facilitator.onBeforeSettle(...)`, so that a new `settle()` call with the same payload object (the seller's retry of a `settlement_pending` purchase) gets a new decision. It registers nothing on `/verify`: the purchase is verified exactly as without the extension, and a test checks that the VerifyResponse is identical with and without a share, with no chain writes.
 
 The log's decision on a share happens while the purchase's settle response waits, so it is bounded: if the log has not decided within `decisionTimeoutMs` (default 2000), the response goes out without a solidarity entry and the decision finishes in the background, where it shows at `/proofs/<id>`. That covers a slow RPC under the scheme's verify, and a `batch-settlement` share waiting for its channel while a claim on that channel is on chain.
 
@@ -170,12 +170,13 @@ It claims what it is owed on any `batch-settlement` channels, builds the batch (
 
 ### How the outcome reaches the buyer
 
-x402Facilitator has no hook that returns an enriched SettleResponse: after-settle hooks return nothing, and `settle()` never builds `extensions` itself. The kit relies on two things 2.28.0 does that its typings do not promise:
+x402Facilitator has no hook that returns an enriched SettleResponse: after-settle hooks return nothing, and `settle()` never builds `extensions` itself. The kit relies on three things 2.28.0 does that its typings do not promise:
 
 - `settle()` returns the very object it passed to the hooks as `ctx.result`. So the kit's hook writes `ctx.result.extensions.solidarity` (for the buyer) and `ctx.result.extensionResponses.solidarity` (for the seller).
+- Every hook of one `settle()` call is handed the same `paymentPayload` object. The kit keys its once-per-settle decision on that object.
 - After-settle hooks run on every result the scheme returns, failed ones included (a failed transfer, `settlement_pending`), although `onAfterSettle` is documented as running "after successful facilitator payment settlement". Holding a pending purchase's share, and telling the buyer `purchase-not-final`, both depend on it.
 
-Neither is a documented contract, which is why the versions are pinned and `facilitator.test.ts` has a canary for each (and one for the recovered-settle gap above, and one that every hook of a settle sees the same `paymentPayload` object). If a canary fails after an upgrade, that is where to look.
+None of them is a documented contract, which is why the versions are pinned and `facilitator.test.ts` has a canary for each (and one for the recovered-settle gap above). If a canary fails after an upgrade, that is where to look.
 
 If you would rather not rely on them, skip `attachSolidarity` and wrap your own `/settle`:
 

@@ -154,6 +154,36 @@ test("a later after-settle hook throws after the kit accepted the share, and the
   assert.deepEqual(w.facilitatorErrors, []);
 });
 
+test("a recovered final result after a pending one is decided again, not answered with the recorded pending", async () => {
+  const w = await makeWorld();
+  w.signer.failNextReceipt(1); // the purchase's receipt wait gives settlement_pending
+  let pendingResult: SettleResponse | undefined;
+  // An operator's hook registered after attachSolidarity, with a bug that fires on the pending result.
+  w.facilitator.onAfterSettle(async (ctx) => {
+    if ((ctx.paymentPayload.extensions as Record<string, unknown> | undefined)?.solidarity && ctx.result.errorReason === "settlement_pending") {
+      pendingResult = { ...ctx.result, extensions: undefined, extensionResponses: undefined };
+      throw new Error("operator hook bug");
+    }
+  });
+  w.facilitator.onSettleFailure(async (ctx) => {
+    if (!pendingResult) return undefined;
+    // The operator's receipt watcher learns the purchase confirmed and recovers with the final result.
+    const recovered: SettleResponse = { ...pendingResult, success: true, errorReason: undefined };
+    await w.solidarity?.afterSettle({ ...ctx, result: recovered });
+    return { recovered: true, result: recovered };
+  });
+  const { payload, requirements, id } = await signedPurchase(w);
+  const r = await w.facilitator.settle(payload, requirements);
+  assert.ok(pendingResult, "the purchase went pending first");
+  assert.equal(r.success, true);
+  const o = readOutcome(r as { extensions?: Record<string, unknown> });
+  assert.equal(o?.status, "accepted", JSON.stringify(o));
+  assert.equal(o?.id, id);
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), 500n, "the held share was released and paid once");
+  assert.equal(w.solidarity?.held.size, 0);
+});
+
 test("a new settle() call with the same payload object gets a new decision: the seller's retry of a settlement_pending purchase, with x402Facilitator in process", async () => {
   const payloads: unknown[] = [];
   const w = await makeWorld({
