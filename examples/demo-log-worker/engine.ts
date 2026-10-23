@@ -45,7 +45,7 @@ export const RATE = "0.001";
 export const CAP = "5000000"; // 5 USDC a month
 export const MIN_BALANCE = 2_000_000n; // stop below 2 USDC
 export const WINDOW_SECONDS = 300; // purchase validity, and the descriptor's maxTimeoutSeconds
-export const FINAL_AFTER = 30; // an unused authorization is final this long after validBefore
+export const FINAL_AFTER = 30; // this clock past validBefore by this much before the chain is read for a final answer (block time then decides)
 export const RESUBMIT_GAP = 60;
 export const MIN_VALIDITY = 60;
 export const MAX_ATTEMPTS = 3;
@@ -513,9 +513,12 @@ export class Engine {
   /**
    * Submit an authorization and wait for a final answer. A failed answer is
    * never taken as final: the chain decides, once the authorization is used
-   * or expired. A failure is returned only after the chain was read past
-   * validBefore + FINAL_AFTER and showed the authorization unused, which is
-   * what draft 3 asks before an exact share is reported uncollected.
+   * or expired. A failure is returned only after the chain, read at a block
+   * whose timestamp is at or after validBefore, showed the authorization
+   * unused, which is what draft 3 asks before an exact share is reported
+   * uncollected: once this clock is past validBefore + FINAL_AFTER, the
+   * latest block's timestamp is read before the state, and while it is still
+   * before validBefore (a stalled chain) nothing is recorded (NotYet).
    * Resubmission happens only when the chain shows it unused, at least
    * RESUBMIT_GAP after the last try, with MIN_VALIDITY left; EIP-3009 nonces
    * make a second execution impossible anyway. An authorization with less
@@ -535,6 +538,9 @@ export class Engine {
       const now = this.io.now();
       const final = now > validBefore + FINAL_AFTER;
       if (check || final) {
+        // Block time, not this clock, decides that validBefore has passed (solidarity.md, "Share kinds"):
+        // read first, so the state read after it is at that block or a later one.
+        const blockTime = final ? await this.io.blockTime() : undefined;
         if (await this.io.authorizationState(a.from, a.nonce)) {
           const w = this.windowFor(o.cycle, payload);
           const t = await this.io.findTransfer(accepted, payload, w);
@@ -544,8 +550,13 @@ export class Engine {
           // lags the node that answered). Never final: the cycle stays unfinished and is looked up again.
           throw new NotYet(`the authorization ${a.nonce.toLowerCase()} was used, but its transfer is not found yet in blocks ${w.fromBlock} to ${w.toBlock}; it is looked up again on the next alarm or tick`);
         }
-        // Unused, read after validBefore + FINAL_AFTER: it can never execute now.
-        if (final) return { ok: false, error: lastError ?? "not executed before validBefore", via: "chain", used: false };
+        if (final) {
+          if ((blockTime as number) < validBefore) {
+            throw new NotYet(`the latest block (time ${blockTime}) is still before validBefore (${validBefore}) of ${a.nonce.toLowerCase()}; it is looked at again on the next alarm or tick`);
+          }
+          // Unused, read at a block at or after validBefore: it can never execute now.
+          return { ok: false, error: lastError ?? "not executed before validBefore", via: "chain", used: false };
+        }
       }
       check = true;
       const canTry = !answered && attempts < MAX_ATTEMPTS && validBefore - now >= MIN_VALIDITY;
@@ -937,10 +948,12 @@ export class Engine {
    * END_DATE (step 1: it is its own only buyer). Once no purchase is
    * unfinished, every month in which it recorded a share has its statement
    * and every share is resolved (step 2, which SolidarityLog.retire checks),
-   * and the last statement's cosignatures are attached or refused by both the
-   * demo witness and the demo fund, it sets `until` on its key to that month
-   * (step 3). It then closes nothing more, and keeps serving everything it
-   * published. Until then closeDue goes on closing months as they end.
+   * and the demo witness and the demo fund have each cosigned or refused
+   * every statement, the last one included, it sets `until` on its key to
+   * that month (step 3). It then closes nothing more, keeps serving
+   * everything it published, and its root did:web document lists no log key
+   * any more (didDocument), so a verifier without the descriptor rejects a
+   * later statement too. Until then closeDue goes on closing months as they end.
    */
   private retireIfDue(): string[] {
     const log = this.log as S.SolidarityLog;
@@ -950,8 +963,10 @@ export class Engine {
     if (end === undefined || now < end) return [];
     const last = log.book.lastClosed?.period;
     if (!last) return [];
-    const settled = (role: "witness" | "fund") => this.store.get("cosign", `${last}:${role}`) ?? this.store.get(role === "witness" ? "witness-refused" : "fund-refused", last);
-    if (!settled("witness") || !settled("fund")) return [];
+    const answered = (p: string, role: "witness" | "fund") => this.store.get("cosign", `${p}:${role}`) ?? this.store.get(role === "witness" ? "witness-refused" : "fund-refused", p);
+    for (let p = (this.genesis as Genesis).keyFrom; p <= last; p = nextPeriod(p)) {
+      if (log.book.get(p) && (!answered(p, "witness") || !answered(p, "fund"))) return [];
+    }
     this.logNow = now;
     let final: string;
     try {
@@ -1054,8 +1069,15 @@ export class Engine {
     return this.log.receipt(id);
   }
 
+  /**
+   * A did:web document. Once the log has retired, the root document lists no
+   * key: retiring withdraws the log key's authorization for the host
+   * (attestation.md, "Retiring a log"), and the key's `jwk` stays in the
+   * descriptor for the statements it signed.
+   */
   didDocument(role: DidRole): Record<string, unknown> | undefined {
     if (!this.genesis || !this.keys || this.degraded) return undefined;
+    if (role === "log" && this.log?.retired) return didDocument(this.genesis.origin, role, undefined);
     return didDocument(this.genesis.origin, role, S.publicJwk(this.keys[role].publicKey));
   }
 

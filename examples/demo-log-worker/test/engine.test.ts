@@ -306,6 +306,11 @@ test("stop conditions are checked before anything is signed", async (t) => {
     const snap = r.engine.snapshot();
     assert.deepEqual([snap.state, snap.finalPeriod], ["retired", "2026-10"]);
     assert.match(renderPage(snap), /Retired\./);
+    // Retiring withdrew the key's authorization: the root did:web document lists no log key, so a
+    // verifier without the descriptor rejects a later statement too. The other two documents stay.
+    const root = r.engine.didDocument("log") as { verificationMethod: unknown[]; assertionMethod: unknown[] };
+    assert.deepEqual([root.verificationMethod, root.assertionMethod], [[], []]);
+    assert.equal((r.engine.didDocument("witness") as { verificationMethod: unknown[] }).verificationMethod.length, 1);
     // Its statement now verifies with the retired key's JWK and a required cosignature; receipts too.
     const resolveKey = S.staticResolver({ [snap.kids?.witness as string]: (r.engine.keys as NonNullable<typeof r.engine.keys>).witness.publicKey });
     const oct = JSON.parse(r.engine.serve("/statements/2026-10").body);

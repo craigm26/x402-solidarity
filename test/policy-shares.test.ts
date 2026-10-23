@@ -67,15 +67,16 @@ test("cap counter: counts at signing, stops at the cap, per UTC month", () => {
   assert.ok(!c.counts("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"));
 });
 
-test("cap counter: release only an exact share shown unexecuted after validBefore", () => {
+test("cap counter: release only an exact share shown unexecuted at a block at or after validBefore", () => {
   const c = new CapCounter({ ...POLICY, cap: { ...POLICY.cap, amount: "100" } });
   c.commit({ id: "a".repeat(22), amount: 60n, period: "2026-12", kind: "exact", validBefore: 1000 });
   c.commit({ id: "b".repeat(22), amount: 30n, period: "2026-12", kind: "batch-settlement" });
-  assert.equal(c.release("a".repeat(22), { now: 1000, executed: false }), false, "not after validBefore yet");
-  assert.equal(c.release("a".repeat(22), { now: 1001, executed: true }), false, "it was executed");
+  assert.equal(c.release("a".repeat(22), { now: 999, executed: false }), false, "read at a block before validBefore");
+  assert.equal(c.release("a".repeat(22), { now: 1000, executed: true }), false, "it was executed");
   assert.equal(c.release("b".repeat(22), { now: 9999, executed: false }), false, "batch shares are never released");
-  assert.equal(c.release("a".repeat(22), { now: 1001, executed: false }), true);
-  assert.equal(c.release("a".repeat(22), { now: 1001, executed: false }), false, "only once");
+  // At a block whose timestamp is validBefore, EIP-3009 no longer executes it (it needs now < validBefore).
+  assert.equal(c.release("a".repeat(22), { now: 1000, executed: false }), true);
+  assert.equal(c.release("a".repeat(22), { now: 1000, executed: false }), false, "only once");
   assert.equal(c.left("2026-12"), 70n);
 });
 

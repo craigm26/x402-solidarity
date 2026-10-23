@@ -219,6 +219,11 @@ export interface LogDescriptor {
   accepts?: DescriptorAccept[];
   minCollection?: string;
   keys: DescriptorKey[];
+  /**
+   * The witnesses the log expects, by DID, for information only. A verifier
+   * never derives the cosigners it requires from these: it names each by its
+   * exact kid itself (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund").
+   */
   witnesses?: string[];
 }
 

@@ -257,11 +257,25 @@ export class ProcessorHolder {
     return { period, collected, carried };
   }
 
-  /** Close a period after its collection. `issuedAt` defaults to the holder's clock, the time the statement is first written. */
+  /**
+   * Close a period after its collection. `issuedAt` defaults to the holder's
+   * clock when the statement is built, and is fixed by its first write.
+   * Synchronous: a `persistStatement` that returns a promise is refused (see
+   * LogBookOptions.persist); use `closePeriodAsync` with an asynchronous store.
+   */
   closePeriod(period: string, issuedAt?: number): PublishedStatement {
     if (period >= periodOf(this.clock())) throw new Error(`cannot close ${period} before it ends`);
-    const lines = [...this.shares.values()].filter((s) => s.collectedIn === period).map((s) => s.line as string);
-    return this.book.close(period, lines, issuedAt);
+    return this.book.close(period, this.linesOf(period), issuedAt);
+  }
+
+  /** `closePeriod` that awaits an asynchronous `persistStatement` before the period is closed and served. */
+  async closePeriodAsync(period: string, issuedAt?: number): Promise<PublishedStatement> {
+    if (period >= periodOf(this.clock())) throw new Error(`cannot close ${period} before it ends`);
+    return this.book.closeAsync(period, this.linesOf(period), issuedAt);
+  }
+
+  private linesOf(period: string): string[] {
+    return [...this.shares.values()].filter((s) => s.collectedIn === period).map((s) => s.line as string);
   }
 
   /** Step 1 of retiring (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"): the holder records no more shares. */
@@ -272,12 +286,13 @@ export class ProcessorHolder {
   /**
    * Retire this log (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Retiring a log"). It refuses, and changes nothing,
    * until the last period with a collected line has its statement and each
-   * kid in `requireCosigners` has a valid cosignature on it. Then it records
-   * no more shares (step 1, which `stopAccepting` does on its own first),
-   * shares still carried below `minCollection` become uncollected, since they
-   * are never collected now (step 2, every share resolved), and `until` is set
-   * on the log's key to the last closed period, whose statement is the final
-   * one (step 3). Collect first. Returns the final period.
+   * kid in `requireCosigners` has cosigned every statement, or refused it
+   * (`refused`). Then it records no more shares (step 1, which `stopAccepting`
+   * does on its own first), shares still carried below `minCollection` become
+   * uncollected (step 2: a processor's log MAY collect them below its minimum
+   * in its final period instead, which `collect` here does not), and `until`
+   * is set on the log's key to the last closed period, whose statement is the
+   * final one (step 3). Collect first. Returns the final period.
    */
   retire(opts: RetireOptions = {}): string {
     const last = this.book.lastClosed;

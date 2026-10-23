@@ -27,13 +27,14 @@ export const kidOf = (origin: string, role: DidRole): string => `${didOf(origin,
 /** The path a did:web DID resolves to on the host. */
 export const didPath = (role: DidRole): string => (role === "log" ? "/.well-known/did.json" : `/${role}/did.json`);
 
-export function didDocument(origin: string, role: DidRole, jwk: PublicJwk): Record<string, unknown> {
+/** The document for `role`'s DID; with no `jwk` (a retired log's root document), it lists no key. */
+export function didDocument(origin: string, role: DidRole, jwk: PublicJwk | undefined): Record<string, unknown> {
   const id = didOf(origin, role);
   const vm = kidOf(origin, role);
   return {
     "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/suites/jws-2020/v1"],
     id,
-    verificationMethod: [{ id: vm, type: "JsonWebKey2020", controller: id, publicKeyJwk: jwk }],
-    assertionMethod: [vm],
+    verificationMethod: jwk ? [{ id: vm, type: "JsonWebKey2020", controller: id, publicKeyJwk: jwk }] : [],
+    assertionMethod: jwk ? [vm] : [],
   };
 }

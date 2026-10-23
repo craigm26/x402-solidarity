@@ -53,6 +53,8 @@ export interface ChainIO {
   sleep(seconds: number): Promise<void>;
   chainId(): Promise<number>;
   blockNumber(): Promise<bigint>;
+  /** The latest block's timestamp, in unix seconds: block time decides that a validBefore has passed. */
+  blockTime(): Promise<number>;
   /** USDC balance. */
   balanceOf(holder: string): Promise<bigint>;
   /** USDC authorizationState(from, nonce): true once the authorization was used. */
@@ -112,6 +114,10 @@ export class LiveIO implements ChainIO {
 
   blockNumber(): Promise<bigint> {
     return this.client.getBlockNumber();
+  }
+
+  async blockTime(): Promise<number> {
+    return Number((await this.client.getBlock()).timestamp);
   }
 
   async balanceOf(holder: string): Promise<bigint> {
@@ -230,6 +236,8 @@ export interface SimHooks {
   refuse?(nonce: string, n: number): SettleAnswer | undefined;
   /** Throw from every read (an RPC endpoint that is down). */
   rpcDown?(): boolean;
+  /** Seconds the latest block's timestamp lags the simulated clock (a chain that stalled). */
+  blockLag?(): number;
 }
 
 /** ChainIO over a SimWorld. `gate` runs on every call (the output gate in the tests). */
@@ -284,6 +292,12 @@ export class SimIO implements ChainIO {
   async blockNumber(): Promise<bigint> {
     this.read("blockNumber");
     return simBlockAt(this.world.now);
+  }
+
+  /** The simulated chain's time stands for its latest block's timestamp; `blockLag` holds it back. */
+  async blockTime(): Promise<number> {
+    this.read("blockTime");
+    return this.world.now - (this.hooks.blockLag?.() ?? 0);
   }
 
   async balanceOf(holder: string): Promise<bigint> {

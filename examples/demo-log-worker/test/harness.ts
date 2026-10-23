@@ -69,6 +69,9 @@ export class SwitchIO implements ChainIO {
   blockNumber(): Promise<bigint> {
     return this.t().blockNumber();
   }
+  blockTime(): Promise<number> {
+    return this.t().blockTime();
+  }
   balanceOf(h: string): Promise<bigint> {
     return this.t().balanceOf(h);
   }

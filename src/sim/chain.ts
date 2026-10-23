@@ -122,6 +122,11 @@ export class SimulatedChain implements LogChain {
     return this.authorizationState(accepted.asset, payload.authorization.from, payload.authorization.nonce);
   }
 
+  /** LogChain.blockTime: the simulated chain's time stands for its latest block's timestamp. */
+  async blockTime(): Promise<number> {
+    return this.now;
+  }
+
   /** LogChain.authorizationCanceled: the chain shows this authorization cancelled (USDC's AuthorizationCanceled event). */
   async authorizationCanceled(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean> {
     return this.canceled.has(`${lc(accepted.asset)}|${lc(payload.authorization.from)}|${lc(payload.authorization.nonce)}`);

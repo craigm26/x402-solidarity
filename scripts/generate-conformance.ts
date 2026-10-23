@@ -319,7 +319,12 @@ export async function runCases() {
   await exactShare("exact-to-not-fund", "The EIP-3009 authorization pays the seller, though accepted.payTo is the fund. The signature is valid for what was signed.", { sign: { payTo: SELLER } });
   await exactShare("exact-value-differs", "The authorization's value (50000) is not accepted.amount (48000).", { sign: { amount: "50000" } });
   await exactShare("exact-nonce-not-from-id", "The nonce is not SHA-256(\"solidarity/2|\" + id), so the signed payment does not bind the id.", { window: { ...w.window, nonce: nonceOf(77) } });
-  await exactShare("exact-not-yet-valid", "validAfter is in the future.", { window: { validAfter: String(NOW + 600), validBefore: String(NOW + 1200) } });
+  await exactShare("exact-not-yet-valid", "validAfter is in the future.", { window: { validAfter: String(NOW + 30), validBefore: String(NOW + 150) } });
+  await exactShare(
+    "exact-valid-too-long",
+    "validBefore is more than the purchase's maxTimeoutSeconds (60) plus twice the share's (60) after the time the log checks it, by one second.",
+    { window: { validAfter: String(NOW - 600), validBefore: String(NOW + 181) } },
+  );
   await exactShare("terms-max-timeout", "accepted.maxTimeoutSeconds (120) is not the descriptor entry's (60).", { accepted: { maxTimeoutSeconds: 120 } });
   await exactShare("terms-extra", "accepted.extra carries a field the descriptor entry does not.", { accepted: { extra: { name: "USDC", version: "2", note: "x" } } });
   await exactShare("network-mismatch", "The share is on Base mainnet; the fund and the purchase are on Base Sepolia.", { accepted: { network: "eip155:8453" } });

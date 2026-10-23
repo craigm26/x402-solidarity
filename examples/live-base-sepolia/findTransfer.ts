@@ -21,7 +21,10 @@
  * authorizationState cannot tell a cancellation from a use, its
  * AuthorizationCanceled(authorizer, nonce) event, searched the same way. A
  * cancellation older than the window is not found, and the share then stays
- * queued rather than being reported uncollected.
+ * queued rather than being reported uncollected. It also gives the latest
+ * block's timestamp (`blockTime`): block time, not the log's clock, decides
+ * that a share's validBefore has passed, and the log reads the state only
+ * after it, so at that block or a later one.
  */
 
 import { getAddress, keccak256, toHex } from "viem";
@@ -56,6 +59,7 @@ interface RawLog {
 export interface LookupClient {
   readContract(args: Record<string, unknown>): Promise<unknown>;
   getBlockNumber(): Promise<bigint>;
+  getBlock(): Promise<{ timestamp: bigint }>;
   request(args: { method: "eth_getLogs"; params: [Record<string, unknown>] }): Promise<unknown>;
   getTransactionReceipt(args: { hash: Hex }): Promise<{ status: "success" | "reverted"; logs: readonly RawLog[] }>;
 }
@@ -70,6 +74,13 @@ export async function authorizationUsedOnChain(client: LookupClient, accepted: P
   const used = await client.readContract({ address: getAddress(accepted.asset), abi: authorizationStateAbi, functionName: "authorizationState", args: [getAddress(payload.authorization.from), payload.authorization.nonce] });
   if (typeof used !== "boolean") throw new Error("authorizationState did not return a bool");
   return used;
+}
+
+/** The latest block's timestamp, in Unix seconds. */
+export async function blockTimeOnChain(client: LookupClient): Promise<number> {
+  const b = await client.getBlock();
+  if (typeof b?.timestamp !== "bigint") throw new Error("the latest block has no timestamp");
+  return Number(b.timestamp);
 }
 
 /** The token's logs of one event for this payer and nonce, walking back from the latest block in chunks, stopping at the first chunk with any. */
@@ -126,10 +137,11 @@ export async function findExactTransferOnChain(
 
 /**
  * Give a chain the lookups, so the log can count a share someone else submitted first, and can
- * show a share uncollected once its validBefore has passed and its authorization is unused or
- * cancelled.
+ * show a share uncollected once the chain, read at a block at or after its validBefore, shows
+ * its authorization unused or cancelled.
  */
 export function withExactLookup<T extends LogChain>(chain: T, client: LookupClient, opts: { lookbackBlocks?: bigint; chunkBlocks?: bigint } = {}): T {
+  chain.blockTime = () => blockTimeOnChain(client);
   chain.findExactTransfer = (accepted, payload) => findExactTransferOnChain(client, accepted, payload, opts);
   chain.authorizationUsed = (accepted, payload) => authorizationUsedOnChain(client, accepted, payload);
   chain.authorizationCanceled = (accepted, payload) => authorizationCanceledOnChain(client, accepted, payload, opts);

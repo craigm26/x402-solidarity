@@ -148,15 +148,21 @@ export class CapCounter {
   }
 
   /**
-   * Release an `exact` share the holder can show was never executed, once its
-   * validBefore has passed. `executed` must come from the chain (for EIP-3009,
-   * `authorizationState(from, nonce)` is false). Returns true when released.
+   * Release an `exact` share once the chain shows that it can no longer
+   * execute ("Owner policy", "Share kinds"). Both values come from one read of
+   * the chain: `now` is the timestamp of the block it was read at, which must
+   * be at or after the share's validBefore, and `executed` is false when the
+   * chain shows that no transfer under the authorization executed there: for
+   * EIP-3009, `authorizationState(from, nonce)` false, or an
+   * `AuthorizationCanceled` event for its nonce, so an owner can release a
+   * share it cancelled itself (USDC's authorizationState reads true for a
+   * cancelled authorization). Returns true when released.
    */
   release(id: string, opts: { now: number; executed: boolean }): boolean {
     const c = this.byId.get(id);
     if (!c || c.released) return false;
     if (c.kind !== "exact" || c.validBefore === undefined) return false;
-    if (opts.now <= c.validBefore || opts.executed) return false;
+    if (opts.now < c.validBefore || opts.executed) return false;
     c.released = true;
     this.totals.set(c.period, this.committed(c.period) - c.amount);
     return true;

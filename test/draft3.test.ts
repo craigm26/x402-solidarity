@@ -34,6 +34,26 @@ const FUND_ADDR = "0x000000000000000000000000000000000000f00d";
 const ELSEWHERE = "0x5555555555555555555555555555555555555555";
 const at = (iso: string) => Date.parse(iso) / 1000;
 
+/** Lets pending promise callbacks and I/O run, until `cond` holds. */
+async function until(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setImmediate(r));
+  assert.ok(cond(), "the condition never held");
+}
+
+/** Collects unhandled rejections while `fn` runs (a store's rejection must never surface as one). */
+async function noUnhandledRejection(fn: () => Promise<void>): Promise<void> {
+  const seen: unknown[] = [];
+  const on = (e: unknown) => seen.push(e);
+  process.on("unhandledRejection", on);
+  try {
+    await fn();
+    await new Promise((r) => setImmediate(r));
+  } finally {
+    process.off("unhandledRejection", on);
+  }
+  assert.deepEqual(seen, [], "unhandled rejections");
+}
+
 // ---- "Signatures and keys" ---------------------------------------------------------------
 
 test("Signatures and keys: only the root did:web DID of the log's host authorizes a log key, never a path DID on that host", () => {
@@ -188,6 +208,76 @@ test("Witnesses and the fund: a new witness walks history signed by a key the lo
   assert.ok(S.jwsVerify(c.signature, witnessKey.publicKey));
 });
 
+test("Witnesses and the fund: a store that writes asynchronously is awaited before the cosignature is released; the synchronous cosign refuses one", async () => {
+  await noUnhandledRejection(async () => {
+    // A write that rejects: nothing is cosigned, and nothing is remembered.
+    const failing = new S.Witness(witnessKey, {
+      persist: async () => {
+        throw new Error("async write failed");
+      },
+    });
+    await assert.rejects(() => failing.cosignAsync(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor }), /async write failed/);
+    assert.deepEqual(failing.record(), []);
+
+    // A slow write: the cosignature waits for it, and a second payload for the period, asked
+    // meanwhile, is checked after it and refused.
+    const pending: Array<() => void> = [];
+    const stored: S.WitnessRecordEntry[] = [];
+    const slow = new S.Witness(witnessKey, { persist: (e) => new Promise<void>((r) => pending.push(() => (stored.push(e), r()))) });
+    let released = false;
+    const first = slow.cosignAsync(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor }).then((env) => ((released = true), env));
+    const oct = S.decodeStatement(pubs[0].statement).payload;
+    const fork = slow.cosignAsync(S.signStatement({ ...oct, issuedAt: oct.issuedAt + 1 }, logKey), { resolveKey, descriptor: ST.descriptor });
+    await until(() => pending.length === 1);
+    assert.equal(released, false, "not released before the write");
+    assert.throws(() => slow.cosign(bare(pubs[1]), { resolveKey }), /asynchronous write is still running/);
+    pending[0]();
+    assert.ok(S.jwsVerify((await first).signature, witnessKey.publicKey));
+    await assert.rejects(fork, /already cosigned another payload for 2026-10/);
+    assert.equal(pending.length, 1, "the refused one stored nothing");
+    assert.deepEqual(stored, [{ log: LOG, period: "2026-10", hash: S.decodeStatement(pubs[0].statement).hash }]);
+
+    // cosign is synchronous: it refuses a store that returns a promise, and then cosigns nothing more.
+    const syncOnAsync = new S.Witness(witnessKey, {
+      persist: async () => {
+        throw new Error("async write failed");
+      },
+    });
+    assert.throws(() => syncOnAsync.cosign(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor }), /persist returned a promise/);
+    assert.throws(() => syncOnAsync.cosign(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor }), /rebuild it from its stored record/);
+    await assert.rejects(() => syncOnAsync.cosignAsync(bare(pubs[0]), { resolveKey, descriptor: ST.descriptor }), /rebuild it from its stored record/);
+
+    // The fund, the same way.
+    const chain = new SimulatedChain({ now: 1793000000 });
+    const payer = privateKeyToAccount(generatePrivateKey());
+    chain.mint(USDC, payer.address, 1_000_000n);
+    const tx = chain.transfer(USDC, payer.address, FUND_ADDR, 48000n);
+    const asset = USDC.toLowerCase();
+    const settlements = S.fileBody([S.formatSettlement({ fund: FUND, asset, ref: `exact:${tx}`, amount: "48000" })]);
+    const batch = S.buildBatch([S.formatLine({ period: "2026-10", fund: FUND, asset, id: "fund-async-share-00001", amount: "48000" })]);
+    const pub = S.signStatement(S.statementPayload({ log: LOG, period: "2026-10", batch, settlementsBody: settlements, previous: null, issuedAt: 1793836800 }), logKey);
+    const fundKey = S.generateSigningKey("EdDSA", "did:web:fund.example#1");
+    const fund = (persist: (a: S.FundRecord) => void | Promise<void>) => new S.FundCosigner({ fund: FUND, key: fundKey, view: chain.fundView(), persist });
+    const failingFund = fund(async () => {
+      throw new Error("async write failed");
+    });
+    await assert.rejects(() => failingFund.cosignAsync(pub, settlements, { resolveKey }), /async write failed/);
+    assert.deepEqual(failingFund.record(), { refs: [], cosigned: [] });
+    const fundStored: S.FundRecord[] = [];
+    const okFund = fund(async (a) => {
+      await new Promise((r) => setImmediate(r));
+      fundStored.push(a);
+    });
+    const env = await okFund.cosignAsync(pub, settlements, { resolveKey });
+    assert.equal(fundStored.length, 1, "stored before the cosignature was returned");
+    assert.ok(S.jwsVerify(env.signature, fundKey.publicKey));
+    assert.deepEqual(okFund.record().refs, [{ ref: `exact:${tx}`, log: LOG, used: "48000" }]);
+    const syncFund = fund(async () => undefined);
+    assert.throws(() => syncFund.cosign(pub, settlements, { resolveKey }), /persist returned a promise/);
+    assert.throws(() => syncFund.cosign(pub, settlements, { resolveKey }), /rebuild it from its stored record/);
+  });
+});
+
 // ---- "Witnesses and the fund": the fund's record ------------------------------------------------
 
 test("Witnesses and the fund: the fund's record survives a restart and covers every log that pays it", () => {
@@ -282,6 +372,61 @@ test("Statements: issuedAt is the time of the first write, for a processor's log
 
 // ---- "Accepted and uncollected shares" -----------------------------------------------------------
 
+test("Statements: a store that writes asynchronously is awaited before the statement is published; if it rejects, nothing is", async () => {
+  await noUnhandledRejection(async () => {
+    const descriptor = { version: 2 as const, log: LOG, funds: [FUND], keys: [{ kid: "did:web:log.example#log-1", from: "2026-10", until: null }] };
+    const key = S.generateSigningKey("EdDSA", descriptor.keys[0].kid);
+    const chain = { submitExact: async () => ({ ok: false as const, error: "unused" }), channelState: () => undefined, claim: async () => ({ ok: false as const, error: "unused" }) };
+    const now = at("2026-11-02T00:00:00Z");
+    const pending: Array<(ok: boolean) => void> = [];
+    const stored: string[] = [];
+    const persistStatement = (c: { period: string }) =>
+      new Promise<void>((resolve, reject) =>
+        pending.push((ok) => {
+          if (!ok) return reject(new Error("async write failed"));
+          stored.push(c.period);
+          resolve();
+        }),
+      );
+    const log = new S.SolidarityLog({ descriptor, key, chain, clock: () => now, persistStatement });
+    const first = log.closePeriod("2026-10", now);
+    await until(() => pending.length === 1);
+    assert.equal(log.handle("/statements/2026-10").status, 404, "not served while it is being stored");
+    assert.equal(log.book.sealed("2026-10"), true);
+    assert.throws(() => log.book.addSettlement("2026-10", "x"), /being closed/, "nothing goes into its batch meanwhile");
+    await assert.rejects(() => log.closePeriod("2026-10", now), /being stored/, "no second close beside it");
+    pending[0](false);
+    await assert.rejects(first, /async write failed/);
+    assert.equal(log.handle("/statements/2026-10").status, 404, "a rejected write publishes nothing");
+    assert.equal(log.book.sealed("2026-10"), false);
+    const second = log.closePeriod("2026-10", now);
+    await until(() => pending.length === 2);
+    pending[1](true);
+    const pub = await second;
+    assert.deepEqual(stored, ["2026-10"]);
+    assert.equal(JSON.parse(log.handle("/statements/2026-10").body).statement.signature, pub.statement.signature);
+
+    // A processor's log: closePeriod is synchronous and refuses a store that returns a promise
+    // (and then closes nothing more); closePeriodAsync awaits it.
+    const pd: LogDescriptor = { version: 2, log: "https://processor.example/solidarity", funds: ["https://fund.example/solidarity"], keys: [{ kid: "did:web:processor.example#1", from: "2026-10", until: null }] };
+    const pkey = S.generateSigningKey("EdDSA", pd.keys[0].kid);
+    const rejecting = async () => {
+      throw new Error("async write failed");
+    };
+    const sync = new S.ProcessorHolder({ descriptor: pd, key: pkey, clock: () => now, persistStatement: rejecting });
+    assert.throws(() => sync.closePeriod("2026-10"), /persist returned a promise/);
+    assert.equal(sync.handle("/statements/2026-10").status, 404);
+    assert.throws(() => sync.closePeriod("2026-10"), /rebuild the book from storage/);
+    const awaited = new S.ProcessorHolder({ descriptor: pd, key: pkey, clock: () => now, persistStatement: rejecting });
+    await assert.rejects(() => awaited.closePeriodAsync("2026-10"), /async write failed/);
+    assert.equal(awaited.handle("/statements/2026-10").status, 404);
+    const saved: string[] = [];
+    const ok = new S.ProcessorHolder({ descriptor: pd, key: pkey, clock: () => now, persistStatement: async (c) => void saved.push(c.period) });
+    await ok.closePeriodAsync("2026-10");
+    assert.deepEqual([saved, ok.handle("/statements/2026-10").status], [["2026-10"], 200]);
+  });
+});
+
 /** A log on the simulated chain, and an owner whose agent buys from a seller with an exact share. */
 async function world(opts: { now?: number; descriptor?: LogDescriptor; logChain?: (chain: SimulatedChain) => S.LogChain } = {}) {
   const chain = new SimulatedChain({ now: opts.now ?? at("2026-12-10T12:00:00Z") });
@@ -295,11 +440,11 @@ async function world(opts: { now?: number; descriptor?: LogDescriptor; logChain?
   const req = (amount = "48000000"): PaymentRequirements => ({ scheme: "exact", network: NET, amount, asset: USDC, payTo: "0x2222222222222222222222222222222222222222", maxTimeoutSeconds: 60, extra: { name: "USDC", version: "2" } });
   const payload = (accepted: PaymentRequirements, info: SolidarityInfo): PaymentPayload => ({ x402Version: 2, accepted, payload: {}, extensions: { solidarity: { info, schema: S.solidaritySchema } } });
   const ok = (extra: Partial<SettleResponse> = {}): SettleResponse => ({ success: true, transaction: "0xpurchase", network: NET, payer: agent.address, ...extra });
-  /** The agent signs a purchase (valid 60 s) and its exact share (valid 60 s longer). */
-  async function share(accepted = req()) {
+  /** The agent signs a purchase (valid 60 s, or until `purchaseEnd`) and its exact share (valid 60 s longer). */
+  async function share(accepted = req(), purchaseEnd = chain.now + 60) {
     const d = await S.buildShare(
       { policy: POLICY, counter, signer: agent, descriptor, now: chain.now },
-      { declared: { version: 2, logs: [{ network: NET, scheme: "exact", log: descriptor.log }] }, accepted, purchaseWindow: { validAfter: String(chain.now - 60), validBefore: String(chain.now + 60) } },
+      { declared: { version: 2, logs: [{ network: NET, scheme: "exact", log: descriptor.log }] }, accepted, purchaseWindow: { validAfter: String(chain.now - 60), validBefore: String(purchaseEnd) } },
     );
     assert.ok(d.attached, d.attached ? "" : d.why);
     const info = (d as Extract<S.ShareDecision, { attached: true }>).info;
@@ -337,7 +482,7 @@ function laggingView(chain: SimulatedChain) {
   return { v, view };
 }
 
-test("Accepted and uncollected shares: a failed submit leaves an exact share queued; it is uncollected only once validBefore has passed and the authorization reads unused", async () => {
+test("Accepted and uncollected shares: a failed submit leaves an exact share queued; it is uncollected only once a block at or after validBefore shows the authorization unused", async () => {
   const w = await world();
   // The agent's balance is gone when the log submits the share.
   const a = await w.share();
@@ -355,13 +500,80 @@ test("Accepted and uncollected shares: a failed submit leaves an exact share que
   w.drain();
   await (await w.settle(b)).followUp;
   const validBefore = Number(b.auth.validBefore);
-  w.chain.now = validBefore + 29; // passed, but inside the margin for block timestamps that lag the log's clock
+  w.chain.now = validBefore - 1; // the latest block is still before validBefore: the transfer could still run
   await w.log.reconcileExact();
   assert.equal(w.state(b.id), "queued");
-  w.chain.now = validBefore + 30;
+  w.chain.now = validBefore; // a block at validBefore: EIP-3009 no longer executes it (it needs now < validBefore)
   await w.log.reconcileExact();
   assert.equal(w.state(b.id), "uncollected");
   assert.deepEqual(w.proof(b.id), { status: "uncollected" });
+});
+
+test("Share kinds: block time, not the log's clock, decides that validBefore has passed; without a block reader the log's clock and a margin stand in", async () => {
+  // A chain that stalled: its latest block is an hour behind the log's clock.
+  let lagSeconds = 3600;
+  const reads: string[] = [];
+  const w = await world({
+    logChain: (c) => ({
+      submitExact: (a, p) => c.submitExact(a, p),
+      channelState: (id) => c.channelState(id),
+      claim: (id, voucher, total) => c.claim(id, voucher, total),
+      blockTime: async () => (reads.push("blockTime"), c.now - lagSeconds),
+      authorizationUsed: async (a, p) => (reads.push("authorizationState"), c.authorizationUsed(a, p)),
+    }),
+  });
+  const s = await w.share();
+  w.drain();
+  await (await w.settle(s)).followUp;
+  const validBefore = Number(s.auth.validBefore);
+  w.chain.now = validBefore + 600;
+  reads.length = 0;
+  await w.log.reconcileExact();
+  assert.equal(w.state(s.id), "queued", "ten minutes past validBefore on the log's clock, but no block at or after it yet");
+  assert.deepEqual(reads, ["blockTime"], "the state is read only after a block at or after validBefore");
+  lagSeconds = 0;
+  reads.length = 0;
+  await w.log.reconcileExact();
+  assert.deepEqual(reads, ["blockTime", "authorizationState"], "block time first, so the state read is at that block or a later one");
+  assert.equal(w.state(s.id), "uncollected");
+
+  // Without blockTime: the log's clock, expiryMarginSeconds (30) past validBefore.
+  let lag: ReturnType<typeof laggingView> | undefined;
+  const m = await world({
+    logChain: (c) => {
+      lag = laggingView(c);
+      return lag.view;
+    },
+  });
+  const t = await m.share();
+  m.drain();
+  await (await m.settle(t)).followUp;
+  m.chain.now = Number(t.auth.validBefore) + 29;
+  await m.log.reconcileExact();
+  assert.equal(m.state(t.id), "queued");
+  m.chain.now = Number(t.auth.validBefore) + 30;
+  await m.log.reconcileExact();
+  assert.equal(m.state(t.id), "uncollected");
+  assert.equal(lag?.view.blockTime, undefined);
+});
+
+test("Share kinds: an exact share's validBefore is at most the purchase's maxTimeoutSeconds plus twice the share's after the log checks it", async () => {
+  const w = await world();
+  // The purchase allows 60 s and the share's entry 60 s, so validBefore may be up to now + 180.
+  const atBound = await w.share(w.req(), w.chain.now + 120);
+  assert.equal(Number(atBound.auth.validBefore), w.chain.now + 180);
+  assert.equal((await w.settle(atBound)).outcome?.status, "accepted");
+  const far = await w.share(w.req(), w.chain.now + 121);
+  const r = await w.settle(far);
+  assert.deepEqual([r.outcome?.status, r.outcome?.reason], ["skipped", "bad-payment"]);
+  assert.equal(w.log.inspect(far.id), undefined);
+  assert.deepEqual([w.proof(far.id), w.log.handle(`/proofs/${far.id}`).status], [{ error: "not found" }, 404]);
+  // A purchase that allows longer allows a longer share.
+  const longer = await w.share({ ...w.req(), maxTimeoutSeconds: 600 }, w.chain.now + 600);
+  assert.equal((await w.settle(longer)).outcome?.status, "accepted");
+  // A share far ahead could hold a statement and retiring back for as long as it stayed unresolved.
+  const year = await w.share(w.req(), w.chain.now + 365 * 86400);
+  assert.equal((await w.settle(year)).outcome?.reason, "bad-payment");
 });
 
 test("Share kinds: a cancelled share is uncollected once its validBefore has passed and the chain shows the cancellation, so the log can still retire", async () => {
@@ -371,10 +583,10 @@ test("Share kinds: a cancelled share is uncollected once its validBefore has pas
   await (await w.settle(s)).followUp;
   assert.equal(w.state(s.id), "queued", "the submit failed; that alone shows nothing");
   assert.equal(await w.chain.authorizationUsed(s.accepted, s.info.payment?.payload as unknown as S.ExactEip3009Payload), true, "authorizationState reads true for a cancelled authorization");
-  w.chain.now = Number(s.auth.validBefore) + 29;
+  w.chain.now = Number(s.auth.validBefore) - 1;
   await w.log.reconcileExact();
-  assert.equal(w.state(s.id), "queued", "not before validBefore has passed");
-  w.chain.now = Number(s.auth.validBefore) + 30;
+  assert.equal(w.state(s.id), "queued", "not before a block at or after validBefore");
+  w.chain.now = Number(s.auth.validBefore);
   await w.log.reconcileExact();
   assert.equal(w.state(s.id), "uncollected");
   assert.deepEqual(w.proof(s.id), { status: "uncollected" });
@@ -546,7 +758,7 @@ test("Retiring a log: stop accepting shares, resolve every one, publish the fina
   const pub = await w.log.closePeriod("2026-12");
 
   // Step 3 waits for the cosignatures the log expects; a refusal changes nothing.
-  assert.throws(() => w.log.retire({ requireCosigners: [witnessKey.kid], resolveKey: resolve }), /no valid cosignature by/);
+  assert.throws(() => w.log.retire({ requireCosigners: [witnessKey.kid], resolveKey: resolve }), /no valid cosignature or refusal by/);
   assert.equal(S.isRetired(w.descriptor), false);
   w.log.addCosignature("2026-12", new S.Witness(witnessKey).cosign(pub, { resolveKey: resolve, descriptor: w.descriptor }));
   assert.equal(w.log.retire({ requireCosigners: [witnessKey.kid], resolveKey: resolve }), "2026-12");
@@ -633,7 +845,7 @@ test("Retiring a log: a processor's log retires the same way; shares still below
   // Step 3 waits for the witness the processor expects.
   const resolve = S.staticResolver({ [key.kid]: key.publicKey, [witnessKey.kid]: witnessKey.publicKey });
   const expect = { requireCosigners: [witnessKey.kid], resolveKey: resolve };
-  assert.throws(() => p.retire(expect), /no valid cosignature by/);
+  assert.throws(() => p.retire(expect), /no valid cosignature or refusal by/);
   assert.equal(descriptor.keys[0].until, null);
   const closed = p.book.get("2026-10") as NonNullable<ReturnType<typeof p.book.get>>;
   p.book.addCosignature("2026-10", new S.Witness(witnessKey).cosign(pub, { resolveKey: resolve, descriptor, files: { lines: closed.lines, settlements: closed.settlements } }));
@@ -644,4 +856,28 @@ test("Retiring a log: a processor's log retires the same way; shares still below
   assert.deepEqual(JSON.parse(p.handle(`/proofs/${small}`).body), { status: "uncollected" });
   clock.now = at("2026-12-02T00:00:00Z");
   assert.throws(() => p.closePeriod("2026-11"), /retired/);
+});
+
+test("Retiring a log: each party it expects must have answered every statement, not only the final one; a refusal counts as an answer", () => {
+  const descriptor: LogDescriptor = { version: 2, log: LOG, funds: [FUND], keys: [{ kid: "did:web:log.example#log-r", from: "2026-10", until: null }] };
+  const key = S.generateSigningKey("EdDSA", descriptor.keys[0].kid);
+  const book = new S.LogBook(descriptor, key, { clock: () => at("2026-12-02T00:00:00Z") });
+  const oct = book.close("2026-10", []);
+  const nov = book.close("2026-11", []);
+  const resolve = S.staticResolver({ [key.kid]: key.publicKey, [witnessKey.kid]: witnessKey.publicKey });
+  const expect = { requireCosigners: [witnessKey.kid], resolveKey: resolve };
+  // A witness that walked back through October but cosigned only November.
+  book.addCosignature("2026-11", new S.Witness(witnessKey).cosign(nov, { resolveKey: resolve, descriptor, history: [oct] }));
+  assert.throws(() => book.retire(expect), /the statement for 2026-10 has no valid cosignature or refusal by/);
+  assert.equal(S.isRetired(descriptor), false, "once the key is retired, October could never be cosigned");
+  // The witness refused October: that is its answer.
+  assert.equal(book.retire({ ...expect, refused: [{ kid: witnessKey.kid, period: "2026-10" }] }), "2026-11");
+  assert.equal(descriptor.keys[0].until, "2026-11");
+
+  // A refused final statement completes retiring as well ("Refusals").
+  const d2: LogDescriptor = { version: 2, log: LOG, funds: [FUND], keys: [{ kid: "did:web:log.example#log-s", from: "2026-10", until: null }] };
+  const b2 = new S.LogBook(d2, S.generateSigningKey("EdDSA", d2.keys[0].kid), { clock: () => at("2026-11-02T00:00:00Z") });
+  b2.close("2026-10", []);
+  assert.throws(() => b2.retire(expect), /2026-10 has no valid cosignature or refusal/);
+  assert.equal(b2.retire({ ...expect, refused: [{ kid: witnessKey.kid, period: "2026-10" }] }), "2026-10");
 });

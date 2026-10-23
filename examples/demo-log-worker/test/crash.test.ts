@@ -239,6 +239,28 @@ test("C4b: the share executed, the facilitator said 502, and the log search lags
   assert.equal(r2.engine.log?.inspect(c.body.share.id)?.state, "collected");
 });
 
+test("C4c: the facilitator refuses the share and the chain stalls: block time, not this clock, decides that validBefore has passed", async () => {
+  const { r, hooks } = await warm();
+  hooks.refuse = (nonce) => (nonce === shareNonce(lastCycle(r)) ? { ok: false, error: "facilitator /settle (400): invalid_exact_evm_insufficient_balance", transport: false } : undefined);
+  let lag = 3600; // the latest block's timestamp is an hour behind this clock
+  hooks.blockLag = () => lag;
+  await assert.rejects(tickAfter(r, 6 * HOUR), (e: unknown) => e instanceof NotYet && /still before validBefore/.test((e as Error).message));
+  const c = lastCycle(r);
+  assert.ok(r.io.now() > c.body.share.validBefore + 30, "this clock is past validBefore and the margin");
+  assert.equal(r.store.get("result", `submit:${shareNonce(c)}`), undefined, "nothing recorded: no block at or after validBefore was read");
+  assert.equal(r.store.get("cycle-end", c.key), undefined);
+  assert.equal(JSON.parse(r.engine.serve(`/proofs/${c.body.share.id}`).body).status, "queued");
+  // The chain catches up: read at a block at or after validBefore, the authorization is unused.
+  lag = 0;
+  r.io.advance(900);
+  assert.deepEqual(await r.engine.maintain(), [`finished cycle ${c.body.n}`]);
+  const result = r.store.get("result", `submit:${shareNonce(c)}`);
+  assert.deepEqual([result?.body.via, result?.body.used], ["chain", false]);
+  assert.equal(endOf(r, c).state, "uncollected");
+  assert.equal(r.world.executions.get(shareNonce(c)), undefined);
+  assert.deepEqual(invariants(r), []);
+});
+
 test("C5: the share executed but its answer was lost: found on chain, collected with that transaction", async () => {
   const { r, hooks } = await warm();
   settleNth(hooks, "afterExecuted", 2, () => r.store.kill("after the share executed"));

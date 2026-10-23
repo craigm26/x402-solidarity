@@ -354,3 +354,17 @@ test("a share settle that fails with a transaction (a reverted transfer) is unco
   assert.equal(log.handle("/lines/2026-10").body, "");
   assert.equal(log.handle("/settlements/2026-10").body, "");
 });
+
+test("blockTime comes through `fallback`, so block time, not the log's clock, decides that a share's validBefore has passed", async () => {
+  const settle = async (): Promise<SettleResponse> => {
+    throw new Error("unused");
+  };
+  const fb = {
+    at: 1793000000,
+    async blockTime() {
+      return this.at;
+    },
+  };
+  assert.equal(await facilitatorLogChain({ settle }, { fallback: fb }).blockTime?.(), 1793000000, "called on the fallback");
+  assert.equal(facilitatorLogChain({ settle }).blockTime, undefined, "without it the log falls back to its clock and margin");
+});

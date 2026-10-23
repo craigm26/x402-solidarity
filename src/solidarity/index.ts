@@ -42,7 +42,8 @@
  * ```ts
  * import { SolidarityLog } from "./solidarity/index.ts";
  *
- * // persistStatement stores each statement before it is published (attestation.md, "Statements")
+ * // persistStatement stores each statement before it is published (attestation.md, "Statements");
+ * // closePeriod awaits it, so it may return a promise
  * const log = new SolidarityLog({ descriptor, key, chain, persistStatement });
  * const verifyResponse = log.onVerify(paymentPayload, await verifyPurchase());   // unchanged
  * const settled = await settlePurchase();
@@ -53,7 +54,7 @@
  * await log.reconcileExact();
  * // each month, after it ends:
  * await log.closePeriod("2026-10");
- * // to stop for good: stopAccepting(), resolve and close, then retire() once the final statement is cosigned
+ * // to stop for good: stopAccepting(), resolve and close, then retire() once every statement is cosigned or refused
  * ```
  */
 
@@ -151,7 +152,7 @@ export { isSolidarityExtension, validateSolidarity, validateOutcome, extractSoli
 export type { LogChain, SettledResult, SolidarityLogOptions } from "./facilitator.ts";
 export { SolidarityLog, purchaseBasis, withOutcome, decodeExtensionResponses } from "./facilitator.ts";
 
-export type { SigningKey, KeyResolver, VerifyOptions, FundView, FundRecord, StatementCheck, ReceiptCheck, Batch, WitnessOptions, WitnessRecordEntry } from "./ledger.ts";
+export type { SigningKey, KeyResolver, VerifyOptions, FundView, FundRecord, StatementCheck, ReceiptCheck, Batch, WitnessOptions, WitnessRecordEntry, WitnessCosignOptions } from "./ledger.ts";
 export {
   formatLine,
   parseLine,

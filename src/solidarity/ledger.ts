@@ -755,10 +755,14 @@ export interface WitnessOptions {
   /** Its record so far, read back from its own storage. Empty or absent for a witness that has never cosigned. */
   record?: WitnessRecordEntry[];
   /**
-   * Stores one new entry durably. Called before the cosignature is returned:
-   * if it throws, nothing is cosigned and the record in memory is unchanged.
+   * Stores one new entry durably. Called before the cosignature is returned
+   * (https://craigmerry.com/solidarity-levy/spec/attestation.md, "Witnesses and the fund": a witness stores each entry
+   * before it releases the cosignature): if it throws or rejects, nothing is
+   * cosigned and the record in memory is unchanged. A store that writes
+   * asynchronously returns its promise and is used through `cosignAsync`,
+   * which awaits it; `cosign` refuses a promise (see Witness).
    */
-  persist?: (entry: WitnessRecordEntry) => void;
+  persist?: (entry: WitnessRecordEntry) => void | Promise<void>;
 }
 
 /**
@@ -788,12 +792,18 @@ export interface WitnessOptions {
  * Its record holds what it cosigned, not what it refused. A refusal stands
  * ("Refusals"): the caller keeps it and does not ask again for that period.
  * It may cosign later statements that chain through a refused one.
+ *
+ * `cosign` is synchronous. With a `persist` that returns a promise it throws
+ * and returns no cosignature, and this witness cosigns nothing more, since
+ * whether that write landed is unknown (rebuild it from its stored record).
+ * `cosignAsync` awaits such a store, one cosignature at a time.
  */
 export class Witness {
   readonly key: SigningKey;
   private readonly last = new Map<string, { hash: string; period: string }>();
   private readonly signed = new Map<string, string>(); // `${log} ${period}` -> payload hash
-  private readonly persist?: (entry: WitnessRecordEntry) => void;
+  private readonly persist?: (entry: WitnessRecordEntry) => void | Promise<void>;
+  private readonly writes = new StoreGate("witness");
 
   constructor(key: SigningKey, opts: WitnessOptions = {}) {
     this.key = key;
@@ -821,13 +831,39 @@ export class Witness {
     if (!prev || e.period > prev.period) this.last.set(e.log, { hash: e.hash, period: e.period });
   }
 
-  cosign(
-    pub: PublishedStatement,
-    opts: Omit<VerifyOptions, "requireCosigners"> & {
-      history?: PublishedStatement[];
-      files?: { lines: string; settlements: string };
-    },
-  ): JwsEnvelope {
+  cosign(pub: PublishedStatement, opts: WitnessCosignOptions): JwsEnvelope {
+    this.writes.syncAllowed();
+    const entry = this.check(pub, opts);
+    if (entry) {
+      this.writes.syncWrite(this.persist?.(entry));
+      this.remember(entry);
+    }
+    return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+  }
+
+  /**
+   * `cosign` for a `persist` that writes asynchronously: the new entry is
+   * stored, and the write awaited, before the cosignature is returned. Calls
+   * run one at a time, so two payloads for one period can never both pass
+   * the check while a write is pending.
+   */
+  cosignAsync(pub: PublishedStatement, opts: WitnessCosignOptions): Promise<JwsEnvelope> {
+    return this.writes.serial(async () => {
+      const entry = this.check(pub, opts);
+      if (entry) {
+        await this.persist?.(entry);
+        this.remember(entry);
+      }
+      return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+    });
+  }
+
+  /**
+   * Every check before a cosignature. Returns the record entry to store, or
+   * undefined when the record already holds this payload (the same
+   * cosignature again). Throws a refusal.
+   */
+  private check(pub: PublishedStatement, opts: WitnessCosignOptions): WitnessRecordEntry | undefined {
     const refuse = (why: string): never => {
       throw new Error(`witness refuses: ${why}`);
     };
@@ -840,7 +876,7 @@ export class Witness {
     if (already !== undefined) {
       if (already !== st.hash) refuse(`already cosigned another payload for ${p.period}`);
       // The same payload again: the same cosignature (its record already holds it).
-      return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+      return undefined;
     }
     const history = opts.history ?? [];
     for (const s of [pub, ...history]) {
@@ -895,11 +931,8 @@ export class Witness {
       if (sha256Hex(opts.files.settlements) !== p.settlements) refuse("settlements file hash differs");
       if (!settlementsMatchTotals(parseFileBody(opts.files.settlements), p.totals)) refuse("settlements do not add up to totals");
     }
-    const entry: WitnessRecordEntry = { log: p.log, period: p.period, hash: st.hash };
-    // Stored before the cosignature leaves: a crash after this point can only repeat it.
-    this.persist?.(entry);
-    this.remember(entry);
-    return { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+    // Stored before the cosignature leaves (cosign, cosignAsync): a crash after that can only repeat it.
+    return { log: p.log, period: p.period, hash: st.hash };
   }
 
   /** The period of `s` if `s` carries this witness's valid cosignature over its payload but its record holds another payload or none for it. */
@@ -921,6 +954,62 @@ export class Witness {
       }
     }
     return undefined;
+  }
+}
+
+/** What Witness.cosign takes: how to verify the log, the history back to its first statement or the last one cosigned, and the published files. */
+export type WitnessCosignOptions = Omit<VerifyOptions, "requireCosigners"> & {
+  history?: PublishedStatement[];
+  files?: { lines: string; settlements: string };
+};
+
+/**
+ * The write rule a witness and a fund share: what they record is stored
+ * before the cosignature is released. A synchronous cosign cannot wait for a
+ * store that returns a promise, so it refuses one, and then refuses every
+ * later write, since whether that write landed is unknown. Asynchronous
+ * cosigns run one at a time, and a synchronous one is refused while one runs.
+ */
+class StoreGate {
+  private readonly who: string;
+  private queue: Promise<unknown> = Promise.resolve();
+  private running = 0;
+  private unsure = false;
+
+  constructor(who: string) {
+    this.who = who;
+  }
+
+  private usable(): void {
+    if (this.unsure) throw new Error(`${this.who} refuses: a write it could not wait for may or may not have landed; rebuild it from its stored record`);
+  }
+
+  syncAllowed(): void {
+    this.usable();
+    if (this.running > 0) throw new Error(`${this.who} refuses: an asynchronous write is still running; use cosignAsync throughout`);
+  }
+
+  /** After a synchronous persist call: refuses (and stops further writes) if it returned a promise. */
+  syncWrite(result: unknown): void {
+    if (typeof result === "object" && result !== null && typeof (result as { then?: unknown }).then === "function") {
+      this.unsure = true;
+      Promise.resolve(result).catch(() => undefined);
+      throw new Error(`${this.who} refuses: persist returned a promise, and cosign is synchronous, so no cosignature was released; rebuild it from its stored record and use cosignAsync`);
+    }
+  }
+
+  serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(async () => {
+      this.usable();
+      this.running += 1;
+      try {
+        return await fn();
+      } finally {
+        this.running -= 1;
+      }
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
   }
 }
 
@@ -963,7 +1052,9 @@ export interface FundRecord {
  * Its record comes back from storage as `record`, and `persist` receives what
  * each cosignature adds to it (the references it changes, with their new
  * totals, and the statement) before the cosignature is returned; if it
- * throws, nothing is cosigned.
+ * throws or rejects, nothing is cosigned. As with a witness, `cosign` refuses
+ * a `persist` that returns a promise (and then cosigns nothing more), and
+ * `cosignAsync` awaits it, one cosignature at a time.
  */
 export class FundCosigner {
   readonly fund: string;
@@ -973,9 +1064,10 @@ export class FundCosigner {
   readonly logAuthorizers: Map<string, string>;
   private readonly refs = new Map<string, { ref: string; log: string; used: bigint }>();
   private readonly done = new Map<string, { hash: string; envelope?: JwsEnvelope }>();
-  private readonly persist?: (added: FundRecord) => void;
+  private readonly persist?: (added: FundRecord) => void | Promise<void>;
+  private readonly writes = new StoreGate("fund");
 
-  constructor(opts: { fund: string; key: SigningKey; view: FundView; logAuthorizers?: Record<string, string>; record?: FundRecord; persist?: (added: FundRecord) => void }) {
+  constructor(opts: { fund: string; key: SigningKey; view: FundView; logAuthorizers?: Record<string, string>; record?: FundRecord; persist?: (added: FundRecord) => void | Promise<void> }) {
     this.fund = canonicalAccount(opts.fund);
     this.key = opts.key;
     this.view = opts.view;
@@ -1000,6 +1092,34 @@ export class FundCosigner {
   }
 
   cosign(pub: PublishedStatement, settlementsBody: string, opts: Omit<VerifyOptions, "requireCosigners">): JwsEnvelope {
+    this.writes.syncAllowed();
+    const r = this.check(pub, settlementsBody, opts);
+    if ("envelope" in r) return r.envelope;
+    this.writes.syncWrite(this.persist?.(r.added));
+    return this.commit(pub, r.added);
+  }
+
+  /** `cosign` for a `persist` that writes asynchronously: the addition is stored, and the write awaited, before the cosignature is returned. */
+  cosignAsync(pub: PublishedStatement, settlementsBody: string, opts: Omit<VerifyOptions, "requireCosigners">): Promise<JwsEnvelope> {
+    return this.writes.serial(async () => {
+      const r = this.check(pub, settlementsBody, opts);
+      if ("envelope" in r) return r.envelope;
+      await this.persist?.(r.added);
+      return this.commit(pub, r.added);
+    });
+  }
+
+  /** Remembers what a cosignature adds, once stored, and signs. */
+  private commit(pub: PublishedStatement, added: FundRecord): JwsEnvelope {
+    for (const r of added.refs) this.refs.set(fundRefKey(r.log, r.ref), { ref: r.ref, log: r.log, used: BigInt(r.used) });
+    const c = added.cosigned[0];
+    const envelope: JwsEnvelope = { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
+    this.done.set(`${c.log} ${c.period}`, { hash: c.hash, envelope });
+    return envelope;
+  }
+
+  /** Every check of the "money arrived" attestation. Returns what a cosignature would add to the record, or the cosignature already given for this payload. Throws a refusal. */
+  private check(pub: PublishedStatement, settlementsBody: string, opts: Omit<VerifyOptions, "requireCosigners">): { added: FundRecord } | { envelope: JwsEnvelope } {
     const st = verifyStatement({ statement: pub.statement, cosignatures: [] }, { resolveKey: opts.resolveKey, descriptor: opts.descriptor, authorizeLogKey: opts.authorizeLogKey });
     if (!st.ok || !st.payload) throw new Error(`fund refuses: ${st.problems.join("; ")}`);
     const p = st.payload;
@@ -1009,7 +1129,7 @@ export class FundCosigner {
       if (prev.hash !== st.hash) throw new Error(`fund refuses: already cosigned another payload for ${p.period}`);
       // The same payload again. After a restart the record has its hash, not the envelope: sign again.
       prev.envelope ??= { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
-      return prev.envelope;
+      return { envelope: prev.envelope };
     }
     if (sha256Hex(settlementsBody) !== p.settlements) throw new Error("fund refuses: settlements file hash differs");
     const entries = parseFileBody(settlementsBody).map(parseSettlement);
@@ -1071,12 +1191,8 @@ export class FundCosigner {
       refs: [...pending].map(([key, amt]) => ({ ref: refOf.get(key) as string, log: p.log, used: ((this.refs.get(key)?.used ?? 0n) + amt).toString() })),
       cosigned: [{ log: p.log, period: p.period, hash: st.hash as string }],
     };
-    // Stored before the cosignature leaves, as a witness's record is.
-    this.persist?.(added);
-    for (const r of added.refs) this.refs.set(fundRefKey(r.log, r.ref), { ref: r.ref, log: r.log, used: BigInt(r.used) });
-    const envelope: JwsEnvelope = { format: "jws", signature: jwsSign(statementBytesFrom(pub), this.key) };
-    this.done.set(slot, { hash: st.hash as string, envelope });
-    return envelope;
+    // Stored before the cosignature leaves (cosign, cosignAsync), as a witness's record is.
+    return { added };
   }
 }
 
