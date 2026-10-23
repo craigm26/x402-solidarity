@@ -412,12 +412,13 @@ export function mandatePolicy(m: Ap2SolidarityMandate): OwnerPolicy {
 /**
  * "Exactly one policy holder applies a share to any purchase." A client must
  * not add `extensions.solidarity` to a payment whose credential the holder of
- * the owner's Solidarity Mandate provides; pass that mandate (or any list of
- * mandates that includes it) and the client's own identity.
+ * the owner's Solidarity Mandate provides. `credentialProvider` is the party
+ * that provides this payment's credential, or undefined when the client signs
+ * the payment with its own key (an x402 payment), which no holder sees.
  */
-export function mayAttachShare(mandates: Array<{ vct?: string; holder?: string }> | undefined, self: string): boolean {
-  const m = mandates?.find((x) => x?.vct === AP2_MANDATE_VCT);
-  return !m || m.holder === self;
+export function mayAttachShare(mandates: unknown, self: string, credentialProvider: string | undefined): boolean {
+  if (!Array.isArray(mandates) || credentialProvider === undefined) return true;
+  return !mandates.some((m) => m && typeof m === "object" && m.vct === AP2_MANDATE_VCT && m.holder === credentialProvider && m.holder !== self);
 }
 
 /** Checksummed form of the account part of a CAIP-10 fund (for display). */

@@ -23,7 +23,7 @@ export const SOLIDARITY = "solidarity";
 export const AP2_MANDATE_VCT = "com.craigmerry.solidarity.1";
 
 /** Why the holder does not enroll a Solidarity Mandate, in its Mandate Receipt. */
-export const AP2_REFUSAL_REASONS = ["bad-policy", "wrong-log", "fund-not-allowed", "superseded"] as const;
+export const AP2_REFUSAL_REASONS = ["bad-policy", "wrong-log", "fund-not-allowed", "superseded", "suspended"] as const;
 export type Ap2RefusalReason = (typeof AP2_REFUSAL_REASONS)[number];
 
 /**

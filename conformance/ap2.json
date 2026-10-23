@@ -1,5 +1,5 @@
 {
-  "note": "One holder (https://processor.example) takes these steps in order, at 2026-10-10. Mandate steps give the `solidarity` property of its Mandate Receipt (null: not the holder, nothing done). Purchase steps finalize a payment and give the share recorded, in minor units (null: none).",
+  "note": "One holder (https://processor.example) takes these steps in order, at 2026-10-10. Mandate steps give the `solidarity` property of its Mandate Receipt (null: not the holder, nothing done); a refusal goes with result error and error invalid_mandate. Purchase steps finalize a payment and give the share recorded, in minor units (null: none). Event steps: the owner stops the policy for a currency, or the holder's collection from the owner is reversed (it suspends the owner).",
   "descriptor": {
     "version": 2,
     "log": "https://processor.example/solidarity",
@@ -153,6 +153,197 @@
         "asset": "USD"
       },
       "share": "30"
+    },
+    {
+      "name": "retry-same-mandate",
+      "self": "https://processor.example",
+      "owner": "a",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 80,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812860
+      },
+      "want": {
+        "status": "enrolled",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "owner-stops",
+      "owner": "c",
+      "event": "owner-stops",
+      "asset": "USD"
+    },
+    {
+      "name": "c-enrolled",
+      "self": "https://processor.example",
+      "owner": "c",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812800
+      },
+      "want": {
+        "status": "enrolled",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "c-purchase",
+      "owner": "c",
+      "purchase": {
+        "amount": "1000",
+        "asset": "USD"
+      },
+      "share": "10"
+    },
+    {
+      "name": "c-stops",
+      "owner": "c",
+      "event": "owner-stops",
+      "asset": "USD"
+    },
+    {
+      "name": "c-purchase-stopped",
+      "owner": "c",
+      "purchase": {
+        "amount": "1000",
+        "asset": "USD"
+      },
+      "share": null
+    },
+    {
+      "name": "c-newer-restarts",
+      "self": "https://processor.example",
+      "owner": "c",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812860
+      },
+      "want": {
+        "status": "enrolled",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "c-purchase-restarted",
+      "owner": "c",
+      "purchase": {
+        "amount": "1000",
+        "asset": "USD"
+      },
+      "share": "10"
+    },
+    {
+      "name": "c-collection-reversed",
+      "owner": "c",
+      "event": "collection-reversed"
+    },
+    {
+      "name": "suspended",
+      "self": "https://processor.example",
+      "owner": "c",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812920
+      },
+      "want": {
+        "status": "refused",
+        "reason": "suspended",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "bad-policy-future-iat",
+      "self": "https://processor.example",
+      "owner": "b",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1791676800
+      },
+      "want": {
+        "status": "refused",
+        "reason": "bad-policy",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "bad-policy-trailing-slash",
+      "self": "https://processor.example",
+      "owner": "b",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example/",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812800
+      },
+      "want": {
+        "status": "refused",
+        "reason": "bad-policy",
+        "log": "https://processor.example/solidarity"
+      }
     },
     {
       "name": "bad-policy-rate",

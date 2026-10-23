@@ -97,6 +97,11 @@ export class CapCounter {
     return this.off;
   }
 
+  /** The owner gave a new consent (for example a newer AP2 Solidarity Mandate) after turning the policy off. */
+  turnOn(): void {
+    this.off = false;
+  }
+
   /** Is `asset` the asset the cap is counted in? Shares in any other asset are not added. */
   counts(asset: string): boolean {
     return sameAccount(asset, this.policy.cap.asset);

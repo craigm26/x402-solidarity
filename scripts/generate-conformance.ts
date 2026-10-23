@@ -557,7 +557,8 @@ function ap2Vectors() {
   const refused = (reason: string) => ({ status: "refused", reason, log: descriptor.log });
   type Step =
     | { name: string; self: string; owner: string; mandate: unknown; want: unknown }
-    | { name: string; owner: string; purchase: { amount: string; asset: string }; share: string | null };
+    | { name: string; owner: string; purchase: { amount: string; asset: string }; share: string | null }
+    | { name: string; owner: string; event: "owner-stops" | "collection-reversed"; asset?: string };
   const steps: Step[] = [
     { name: "not-the-holder", self: "https://network.example", owner: "a", mandate: base, want: null },
     { name: "enrolled", self: HOLDER, owner: "a", mandate: base, want: enrolled },
@@ -568,6 +569,18 @@ function ap2Vectors() {
     { name: "superseded-older", self: HOLDER, owner: "a", mandate: { ...base, iat: iat - 60 }, want: refused("superseded") },
     { name: "newer-replaces", self: HOLDER, owner: "a", mandate: { ...base, iat: iat + 60, cap: { amount: 80, currency: "USD" } }, want: enrolled },
     { name: "purchase-4-after-replace", owner: "a", purchase: { amount: "4000", asset: "USD" }, share: "30" },
+    { name: "retry-same-mandate", self: HOLDER, owner: "a", mandate: { ...base, iat: iat + 60, cap: { amount: 80, currency: "USD" } }, want: enrolled },
+    { name: "owner-stops", owner: "c", event: "owner-stops", asset: "USD" },
+    { name: "c-enrolled", self: HOLDER, owner: "c", mandate: base, want: enrolled },
+    { name: "c-purchase", owner: "c", purchase: { amount: "1000", asset: "USD" }, share: "10" },
+    { name: "c-stops", owner: "c", event: "owner-stops", asset: "USD" },
+    { name: "c-purchase-stopped", owner: "c", purchase: { amount: "1000", asset: "USD" }, share: null },
+    { name: "c-newer-restarts", self: HOLDER, owner: "c", mandate: { ...base, iat: iat + 60 }, want: enrolled },
+    { name: "c-purchase-restarted", owner: "c", purchase: { amount: "1000", asset: "USD" }, share: "10" },
+    { name: "c-collection-reversed", owner: "c", event: "collection-reversed" },
+    { name: "suspended", self: HOLDER, owner: "c", mandate: { ...base, iat: iat + 120 }, want: refused("suspended") },
+    { name: "bad-policy-future-iat", self: HOLDER, owner: "b", mandate: { ...base, iat: now + 86400 }, want: refused("bad-policy") },
+    { name: "bad-policy-trailing-slash", self: HOLDER, owner: "b", mandate: { ...base, holder: `${HOLDER}/` }, want: refused("bad-policy") },
     { name: "bad-policy-rate", self: HOLDER, owner: "b", mandate: { ...base, rate: "0.02" }, want: refused("bad-policy") },
     { name: "bad-policy-no-iat", self: HOLDER, owner: "b", mandate: { ...base, iat: undefined }, want: refused("bad-policy") },
     { name: "bad-policy-expired", self: HOLDER, owner: "b", mandate: { ...base, exp: iat + 3600 }, want: refused("bad-policy") },
@@ -575,7 +588,10 @@ function ap2Vectors() {
     { name: "fund-not-allowed", self: HOLDER, owner: "b", mandate: { ...base, fund: "https://elsewhere.example/fund" }, want: refused("fund-not-allowed") },
   ];
   for (const st of steps) {
-    if ("mandate" in st) {
+    if ("event" in st) {
+      if (st.event === "owner-stops") holder.stop(st.owner, st.asset as string);
+      else holder.onCollectionReversed(st.owner);
+    } else if ("mandate" in st) {
       const got = holder.enrollAp2({ self: st.self, owner: st.owner, mandate: st.mandate }).receipt ?? null;
       if (JSON.stringify(got) !== JSON.stringify(st.want)) throw new Error(`ap2 step ${st.name}: holder says ${JSON.stringify(got)}, want ${JSON.stringify(st.want)}`);
     } else {
@@ -585,7 +601,7 @@ function ap2Vectors() {
     }
   }
   return {
-    note: "One holder (https://processor.example) takes these steps in order, at 2026-10-10. Mandate steps give the `solidarity` property of its Mandate Receipt (null: not the holder, nothing done). Purchase steps finalize a payment and give the share recorded, in minor units (null: none).",
+    note: "One holder (https://processor.example) takes these steps in order, at 2026-10-10. Mandate steps give the `solidarity` property of its Mandate Receipt (null: not the holder, nothing done); a refusal goes with result error and error invalid_mandate. Purchase steps finalize a payment and give the share recorded, in minor units (null: none). Event steps: the owner stops the policy for a currency, or the holder's collection from the owner is reversed (it suspends the owner).",
     descriptor,
     steps: steps.map((st) => JSON.parse(JSON.stringify(st))),
   };

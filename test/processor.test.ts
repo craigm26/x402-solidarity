@@ -152,11 +152,18 @@ test("AP2 enrollment: every refusal reason", () => {
   assert.equal(reason(enroll(p, mandate({ exp: IAT - 1 }))), "bad-policy", "exp before iat");
   assert.equal(reason(enroll(p, mandate({ exp: Date.UTC(2026, 9, 5) / 1000 }))), "bad-policy", "already expired");
   assert.equal(reason(enroll(p, mandate({ holder: "https://Processor.example" }))), "bad-policy", "a mixed-case holder is refused, not silently ignored");
+  assert.equal(reason(enroll(p, mandate({ holder: "https://processor.example/" }))), "bad-policy", "so is a trailing slash");
+  assert.equal(reason(enroll(p, mandate({ holder: "https://processor.example:443" }))), "bad-policy", "and an explicit default port");
+  assert.equal(reason(enroll(p, mandate({ iat: Date.UTC(2027, 0, 1) / 1000 }))), "bad-policy", "an iat in the future");
+  assert.equal(reason(enroll(p, mandate({ iat: Number.MAX_SAFE_INTEGER }))), "bad-policy", "an iat past any date");
   assert.equal(reason(enroll(p, mandate({ logs: ["https://other.example/solidarity"] }))), "wrong-log");
   assert.equal(reason(enroll(p, mandate({ fund: "https://elsewhere.example/fund" }))), "fund-not-allowed");
   assert.equal(status(enroll(p, mandate(), "owner-7")), "enrolled");
   assert.equal(reason(enroll(p, mandate({}, IAT - 60), "owner-7")), "superseded", "an older mandate never replaces a newer one");
-  assert.equal(reason(enroll(p, mandate(), "owner-7")), "superseded", "nor does the same one again");
+  assert.equal(status(enroll(p, mandate(), "owner-7")), "enrolled", "a retry of the enrolled mandate gets the same answer");
+  p.onCollectionReversed("owner-7");
+  assert.equal(reason(enroll(p, mandate({}, IAT + 60), "owner-7")), "suspended", "a newer mandate does not lift a suspension");
+  assert.equal(reason(enroll(p, mandate(), "owner-7")), "suspended", "nor does a retry");
   assert.deepEqual([...new Set(seen)].sort(), [...S.AP2_REFUSAL_REASONS].sort(), "every reason exercised");
   assert.deepEqual([...S.ap2EnrollmentSchema.properties.reason.enum], [...S.AP2_REFUSAL_REASONS]);
 });
@@ -194,4 +201,17 @@ test("AP2: one policy per currency; a policy ends at its exp", () => {
   assert.equal(status(enroll(p, mandate({ exp: Date.UTC(2026, 9, 20) / 1000 }), "owner-9")), "enrolled");
   clock.now = Date.UTC(2026, 9, 21) / 1000;
   assert.equal(p.recordPurchase({ owner: "owner-9", purchaseId: "x1", amount: "9000", asset: "USD" }), undefined, "past exp: no share");
+});
+
+test("AP2: the owner can stop a policy at once, and a newer mandate starts it again", () => {
+  const { p } = setup("keep");
+  assert.equal(status(enroll(p, mandate(), "owner-10")), "enrolled");
+  assert.ok(p.recordPurchase({ owner: "owner-10", purchaseId: "s1", amount: "5000", asset: "USD" }));
+  assert.equal(p.stop("owner-10", "USD"), true);
+  assert.equal(p.stop("owner-10", "EUR"), false, "no EUR policy to stop");
+  assert.equal(p.recordPurchase({ owner: "owner-10", purchaseId: "s2", amount: "5000", asset: "USD" }), undefined, "stopped: no share");
+  assert.equal(status(enroll(p, mandate(), "owner-10")), "enrolled", "a retry of the old mandate is answered, but does not restart it");
+  assert.equal(p.recordPurchase({ owner: "owner-10", purchaseId: "s3", amount: "5000", asset: "USD" }), undefined);
+  assert.equal(status(enroll(p, mandate({}, IAT + 60), "owner-10")), "enrolled");
+  assert.ok(p.recordPurchase({ owner: "owner-10", purchaseId: "s4", amount: "5000", asset: "USD" }), "a newer mandate is a new consent");
 });

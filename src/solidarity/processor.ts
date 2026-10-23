@@ -17,7 +17,7 @@ import type { ProofResult } from "./book.ts";
 import type { SigningKey } from "./ledger.ts";
 import { formatLine, formatSettlement } from "./ledger.ts";
 import { mandatePolicy } from "./client.ts";
-import { CapCounter, assertPolicy, policyProblems } from "./policy.ts";
+import { CapCounter, assertPolicy, policyHash, policyProblems } from "./policy.ts";
 import { ap2MandateSchema, validateSchema } from "./schema.ts";
 import type { Ap2EnrollmentOutcome, Ap2RefusalReason, Ap2SolidarityMandate, LogDescriptor, OwnerPolicy, PublishedStatement, Receipt } from "./types.ts";
 import { applyRate, generateShareId, netCredit, nextPeriod, periodOf } from "./utils.ts";
@@ -31,6 +31,9 @@ interface Owner {
   iat?: number;
   until?: number;
 }
+
+/** How far ahead of the holder's clock a Solidarity Mandate's iat may be. */
+const IAT_SKEW_SECONDS = 300;
 
 /** One policy per owner per currency (solidarity.md, "Owner policy": one policy per asset). */
 const ownerKey = (owner: string, asset: string) => `${owner}\n${asset}`;
@@ -88,19 +91,23 @@ export class ProcessorHolder {
    *
    * `owner` is however the holder knows the owner. One policy per owner per
    * cap currency: a mandate with a later `iat` replaces the one for its
-   * currency and keeps what the owner already committed that month; one with
-   * an earlier or equal `iat` is refused as `superseded`.
+   * currency, keeps what the owner already committed that month and restarts
+   * a stopped policy; one with an earlier `iat` is refused as `superseded`; a
+   * retry of the enrolled mandate is answered `enrolled` again. A suspended
+   * owner is refused as `suspended`. On a refusal the holder's Mandate Receipt
+   * has `result: "error"` and `error: "invalid_mandate"`.
    */
   enrollAp2(p: { self: string; owner: string; mandate: unknown }): { receipt?: Ap2EnrollmentOutcome } {
-    if (!/^https:\/\/[^/?#\sA-Z]+$/.test(p.self)) throw new Error("self must be the holder's lowercase https origin");
+    if (!/^https:\/\/[^/?#\sA-Z]+$/.test(p.self) || new URL(p.self).origin !== p.self) throw new Error("self must be the holder's lowercase https origin");
     const m = p.mandate as Partial<Ap2SolidarityMandate> | null;
-    if (!m || typeof m !== "object" || typeof m.holder !== "string" || m.holder.toLowerCase() !== p.self) return {};
+    if (!m || typeof m !== "object" || typeof m.holder !== "string" || !URL.canParse(m.holder) || new URL(m.holder).origin !== p.self) return {};
     const log = this.book.descriptor.log;
     const refuse = (reason: Ap2RefusalReason) => ({ receipt: { status: "refused" as const, reason, log } });
-    if (validateSchema(ap2MandateSchema, m).length) return refuse("bad-policy");
+    // Meant for this holder but not written as its exact origin (case, trailing slash, port): refused, never ignored.
+    if (m.holder !== p.self || validateSchema(ap2MandateSchema, m).length) return refuse("bad-policy");
     const mandate = m as Ap2SolidarityMandate;
     const now = this.clock();
-    if (!Number.isSafeInteger(mandate.cap.amount) || !Number.isSafeInteger(mandate.iat) || mandate.iat <= 0) return refuse("bad-policy");
+    if (!Number.isSafeInteger(mandate.cap.amount) || !Number.isSafeInteger(mandate.iat) || mandate.iat <= 0 || mandate.iat > now + IAT_SKEW_SECONDS) return refuse("bad-policy");
     if (mandate.exp !== undefined && (!Number.isSafeInteger(mandate.exp) || mandate.exp <= mandate.iat || mandate.exp <= now)) return refuse("bad-policy");
     const policy = mandatePolicy(mandate);
     if (policyProblems(policy, "processor").length) return refuse("bad-policy");
@@ -108,10 +115,17 @@ export class ProcessorHolder {
     if (!this.book.descriptor.funds.includes(policy.fund)) return refuse("fund-not-allowed");
     const key = ownerKey(p.owner, policy.cap.asset);
     const known = this.owners.get(key);
+    // A retry of the mandate already enrolled gets the same answer.
+    if (known && known.iat === mandate.iat && known.until === mandate.exp && policyHash(known.policy) === policyHash(policy)) {
+      return known.suspended ? refuse("suspended") : { receipt: { status: "enrolled", log } };
+    }
     const knownSince = known ? (known.iat ?? Math.floor(Date.parse(known.policy.since) / 1000)) : undefined;
     if (knownSince !== undefined && knownSince >= mandate.iat) return refuse("superseded");
+    // The holder suspended this owner after a reversed collection; a new mandate does not lift that.
+    if (known?.suspended) return refuse("suspended");
     const counter = known ? known.counter.withPolicy(policy) : new CapCounter(policy);
-    this.owners.set(key, { policy, counter, credits: known?.credits ?? [], suspended: known?.suspended ?? false, iat: mandate.iat, until: mandate.exp });
+    counter.turnOn(); // a newer mandate is a new consent, even after the owner stopped the old one
+    this.owners.set(key, { policy, counter, credits: known?.credits ?? [], suspended: false, iat: mandate.iat, until: mandate.exp });
     return { receipt: { status: "enrolled", log } };
   }
 
@@ -170,6 +184,18 @@ export class ProcessorHolder {
     const lapsesAfter = nextPeriod(periodOf(this.clock()));
     o.credits.push({ amount: credit, lapsesAfter });
     return { credit, lapsesAfter };
+  }
+
+  /**
+   * The owner told the holder to stop the policy for `asset` ("Owner policy":
+   * stop at once when the owner turns the policy off). A newer Solidarity
+   * Mandate starts it again. Returns false if there was no such policy.
+   */
+  stop(owner: string, asset: string): boolean {
+    const o = this.owners.get(ownerKey(owner, asset));
+    if (!o) return false;
+    o.counter.turnOff();
+    return true;
   }
 
   /** The processor's own collection from the owner was reversed: the loss is the processor's; it may suspend the policy. */

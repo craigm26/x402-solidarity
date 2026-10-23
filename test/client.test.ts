@@ -171,9 +171,14 @@ test("exactly one policy holder: no share under a mandate whose holder is someon
   const c = ctx();
   const d = await S.buildShare(c, { declared, accepted: req("48000000"), mandateHolder: "https://processor.example", self: "agent-1" });
   assert.equal(d.attached, false);
-  assert.equal(S.mayAttachShare([{ vct: S.AP2_MANDATE_VCT, holder: "https://processor.example" }], "agent-1"), false);
-  assert.equal(S.mayAttachShare([{ vct: S.AP2_MANDATE_VCT, holder: "agent-1" }], "agent-1"), true);
-  assert.equal(S.mayAttachShare([{ vct: "mandate.payment.open.1" }], "agent-1"), true, "other mandates don't name a holder");
+  const cp = "https://processor.example";
+  const mandates = [{ vct: S.AP2_MANDATE_VCT, holder: cp }];
+  assert.equal(S.mayAttachShare(mandates, "agent-1", cp), false, "the holder provides this payment's credential: no second share");
+  assert.equal(S.mayAttachShare(mandates, "agent-1", undefined), true, "an x402 payment the client signs itself: the holder never sees it");
+  assert.equal(S.mayAttachShare(mandates, "agent-1", "https://other-cp.example"), true, "another credential provider is not the holder");
+  assert.equal(S.mayAttachShare(mandates, cp, cp), true, "the holder itself");
+  assert.equal(S.mayAttachShare([{ vct: "mandate.payment.open.1" }], "agent-1", cp), true, "other mandates don't name a holder");
+  for (const junk of [undefined, null, "x", { vct: S.AP2_MANDATE_VCT, holder: cp }, [null, 1, "x"]]) assert.equal(S.mayAttachShare(junk, "agent-1", cp), true, JSON.stringify(junk));
   assert.equal(S.mayAttachShare([], "agent-1"), true);
 });
 
