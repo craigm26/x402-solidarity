@@ -5,7 +5,7 @@
  */
 
 import type { CycleView, Snapshot, StatementView } from "./engine.ts";
-import { usdc } from "./engine.ts";
+import { DEFAULT_FACILITATOR, usdc } from "./engine.ts";
 
 const esc = (s: unknown): string => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const iso = (t: number | null | undefined): string => (t ? new Date(t * 1000).toISOString().replace(".000Z", "Z").replace("T", " ") : "");
@@ -39,11 +39,12 @@ function cycleRow(s: Snapshot, c: CycleView): string {
 
 function statementBlock(s: Snapshot, st: StatementView): string {
   const totals = st.totals.length ? st.totals.map((t) => `${t.lines} lines, ${esc(usdc(t.amount))} USDC to <code>${esc(t.fund)}</code>`).join("; ") : "no lines (an empty month still gets a statement)";
+  const chain = s.mode === "sim" ? "the repository's simulated chain" : "Base Sepolia";
   let fund: string;
-  if (st.fund) fund = "the demo fund cosigned it: it read every listed transaction on Base Sepolia and found each transfer to the fund address.";
+  if (st.fund) fund = `the demo fund cosigned it: it read every listed transaction on ${chain} and found each transfer to the fund address.`;
   else if (st.fundRefused?.definitive) fund = `<strong>the demo fund did not cosign it.</strong> It checked the listed transactions and refused: ${esc(st.fundRefused.reason)}`;
   else if (st.fundRefused) fund = `<strong>the demo fund did not cosign it.</strong> ${esc(st.fundRefused.reason)}.`;
-  else fund = "the demo fund has not cosigned it yet (it waits for 12 confirmations and a readable RPC endpoint).";
+  else fund = s.mode === "sim" ? "the demo fund has not cosigned it yet (it waits for 12 confirmations on the simulated chain)." : "the demo fund has not cosigned it yet (it waits for 12 confirmations and a readable RPC endpoint).";
   return `<h3>${esc(st.period)}</h3>
 <dl>
   <dt>Lines</dt><dd>${st.size}</dd>
@@ -61,12 +62,14 @@ export function renderPage(s: Snapshot): string {
   const sim = s.mode === "sim";
   const state =
     s.state === "degraded"
-      ? `<p class="warn"><strong>Stopped.</strong> The log could not rebuild itself from its records and serves nothing until its operator looks: ${esc(s.degraded)}</p>`
+      ? `<p class="warn"><strong>Stopped.</strong> The log found a problem in its own records or settings and serves nothing until its operator looks: ${esc(s.degraded)}</p>`
       : s.state === "paused"
         ? `<p class="warn"><strong>Paused.</strong> No new purchases start. Recorded work (an unfinished purchase, a month close) still finishes.</p>`
         : s.state === "ended"
           ? `<p><strong>Ended.</strong> No purchases start after ${esc(s.endDate)}. Months still close while the Worker exists.</p>`
-          : `<p><strong>Running.</strong> A purchase every 6 hours until ${esc(s.endDate)}.</p>`;
+          : s.state === "waiting"
+            ? `<p class="warn"><strong>No purchases.</strong> The last tick, at ${esc(iso(s.lastTick?.at))}, started no purchase: ${esc(s.waiting)}. Each tick, every 6 hours, checks again. Recorded work (an unfinished purchase, a month close) still finishes.</p>`
+            : `<p><strong>Running.</strong> A purchase every 6 hours until ${esc(s.endDate)}.</p>`;
   const latest = s.statements[0];
   const period = latest?.period ?? s.keyFrom ?? "2026-10";
   const exampleId = s.cycles[0]?.share.id ?? "<id>";
@@ -74,7 +77,7 @@ export function renderPage(s: Snapshot): string {
   const lastTick = s.lastTick ? `${esc(iso(s.lastTick.at))}${s.lastTick.stop ? `: no purchase (${esc(s.lastTick.stop)})` : s.lastTick.cycle ? `: purchase ${esc(s.lastTick.cycle)}` : ""}` : "none yet";
   const real = sim
     ? `<p class="warn"><strong>This copy runs in simulated mode.</strong> Nothing here touched any chain: the transactions below are on the repository's simulated chain, and their hashes exist nowhere else.</p>`
-    : `<p>The purchases and shares below are real <strong>Base Sepolia</strong> transactions in test USDC, which has no value, settled through the public x402 facilitator at <code>${esc(s.facilitator)}</code>, which pays the gas. Every settlement reference (<code>exact:&lt;transaction&gt;</code>) can be opened on <a href="https://sepolia.basescan.org/">sepolia.basescan.org</a>.</p>`;
+    : `<p>The purchases and shares below are real <strong>Base Sepolia</strong> transactions in test USDC, which has no value, settled through ${s.facilitator === DEFAULT_FACILITATOR ? `the public x402 facilitator at <code>${esc(s.facilitator)}</code>, which pays the gas` : `the x402 facilitator at <code>${esc(s.facilitator)}</code>`}. Every settlement reference (<code>exact:&lt;transaction&gt;</code>) can be opened on <a href="https://sepolia.basescan.org/">sepolia.basescan.org</a>.</p>`;
 
   return `<!doctype html>
 <html lang="en">

@@ -12,6 +12,7 @@ import { test } from "node:test";
 import * as S from "../../../src/solidarity/index.ts";
 import type { PublishedStatement } from "../../../src/solidarity/index.ts";
 import type { SimHooks } from "../io.ts";
+import { NotYet } from "../engine.ts";
 import { Crash } from "../store.ts";
 import { at, collected, HOUR, invariants, restart, rig, tickAfter } from "./harness.ts";
 import type { Rig } from "./harness.ts";
@@ -138,6 +139,9 @@ test("C4: dies after the share's intent, before its POST left", async (t) => {
       const r2 = await crashAndRestart(r);
       const c = lastCycle(r2);
       assert.ok(r2.store.get("intent", `submit:${shareNonce(c)}`));
+      // The log had accepted the share: after the restart it is still queued, never "not found".
+      const proof = r2.engine.serve(`/proofs/${c.body.share.id}`);
+      assert.equal(`${proof.status} ${proof.contentType} ${proof.body}`, '200 application/json {"status":"queued"}');
       r2.io.advance(wait);
       await r2.engine.maintain();
       const sum = endOf(r2, c);
@@ -151,6 +155,45 @@ test("C4: dies after the share's intent, before its POST left", async (t) => {
       assert.deepEqual(invariants(r2), []);
     });
   }
+});
+
+test("C4b: the share executed, the facilitator said 502, and the log search lags: never recorded uncollected", async () => {
+  const { r, hooks } = await warm();
+  let settles = 0;
+  hooks.answer = (_n, _i, real) => (++settles === 2 && real.ok ? { ok: false, error: "facilitator /settle (502): bad gateway", transport: false } : real);
+  // A load-balanced RPC: authorizationState already says used, but the next two log searches miss the block.
+  const find = r.io.findTransfer.bind(r.io);
+  let lag = 2;
+  r.io.findTransfer = async (a, p, w) => (lag-- > 0 ? undefined : find(a, p, w));
+  const failuresBefore = r.store.status("failures");
+  await assert.rejects(tickAfter(r, 6 * HOUR), (e: unknown) => e instanceof NotYet && /not found yet/.test((e as Error).message));
+  const c = lastCycle(r);
+  assert.equal(r.world.executions.get(shareNonce(c)), 1, "the share's transfer ran");
+  assert.equal(r.store.get("result", `submit:${shareNonce(c)}`), undefined, "no answer recorded");
+  assert.equal(r.store.get("lookup", `lookup:${shareNonce(c)}`), undefined);
+  assert.equal(r.store.get("cycle-end", c.key), undefined);
+  assert.equal(r.engine.degraded, undefined);
+  assert.equal(r.engine.snapshot().unfinished, c.body.n);
+  assert.equal(JSON.parse(r.engine.serve(`/proofs/${c.body.share.id}`).body).status, "queued");
+  assert.equal(r.store.status("failures"), failuresBefore, "a transfer not readable yet is not a failed purchase");
+  // The alarm looks again: still lagging, still nothing recorded.
+  r.io.advance(900);
+  await assert.rejects(r.engine.maintain(), NotYet);
+  assert.equal(r.store.get("cycle-end", c.key), undefined);
+  // And again: found, collected with the transaction that ran.
+  r.io.advance(900);
+  assert.deepEqual(await r.engine.maintain(), [`finished cycle ${c.body.n}`]);
+  const sum = endOf(r, c);
+  assert.equal(sum.state, "collected");
+  const t = await r.world.chain.findExactTransfer(c.body.share.info.payment.accepted, c.body.share.info.payment.payload);
+  assert.equal(sum.transaction, t?.transaction);
+  assert.equal(r.store.get("result", `submit:${shareNonce(c)}`)?.body.via, "chain");
+  assert.equal(r.store.status("backoffUntil"), undefined);
+  assert.deepEqual(invariants(r), []);
+  // And the restart after it replays to the same decision.
+  const r2 = await restart(r);
+  assert.equal(r2.engine.degraded, undefined, r2.engine.degraded);
+  assert.equal(r2.engine.log?.inspect(c.body.share.id)?.state, "collected");
 });
 
 test("C5: the share executed but its answer was lost: found on chain, collected with that transaction", async () => {
@@ -238,6 +281,28 @@ test("C8 and C9: dies before the witness's or the fund's cosignature: added on r
       assert.equal(S.verifyStatement(after, { resolveKey, descriptor: r2.engine.descriptor, requireCosigners: [k.witness.kid, k.fund.kid] }).ok, true);
     });
   }
+});
+
+test("C8b: dies before October's witness cosignature and wakes after November ended: the witness cosigns both, in order", async () => {
+  const r = await beforeClose();
+  r.store.onAppend = (kind, key) => {
+    if (kind === "cosign" && key === "2026-10:witness") {
+      r.store.gate();
+      throw r.store.kill("before the witness cosignature");
+    }
+  };
+  const r2 = await crashAndRestart(r);
+  r2.io.advance(30 * 86400); // 2026-12-01T00:00Z: November is due before October's cosignatures are made
+  const t = await r2.engine.tick();
+  assert.equal(r2.engine.degraded, undefined, r2.engine.degraded);
+  assert.ok(t.maintained.includes("closed 2026-11"));
+  const witness = r2.store.events().filter((e) => e.kind === "cosign" && e.body.role === "witness").map((e) => e.key);
+  assert.deepEqual(witness, ["2026-10:witness", "2026-11:witness"], "October first, then November");
+  assert.equal(r2.store.get("witness-refused", "2026-11"), undefined);
+  const pubs = ["2026-10", "2026-11"].map((p) => JSON.parse(r2.engine.serve(`/statements/${p}`).body) as PublishedStatement);
+  assert.ok(pubs.every((p) => p.cosignatures.length === 2));
+  assert.equal(S.verifyChain(pubs).ok, true);
+  assert.equal(S.decodeStatement(pubs[1].statement).payload.previous, r2.store.get("cosign", "2026-10:witness")?.body.payloadHash);
 });
 
 test("C10: a storage write fails mid-cycle: the engine rebuilds itself and the alarm finishes the cycle", async () => {

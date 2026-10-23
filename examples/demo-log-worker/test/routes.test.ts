@@ -136,4 +136,12 @@ test("routes over a real engine: bodies are exactly what SolidarityLog.handle re
   const receipt = await route(req(`/receipts/${id}`), site);
   assert.equal(receipt.status, 200);
   assert.equal((await receipt.json()).version, 2);
+  // Cache headers: a closed month's lines and settlements never change; the page and status.json for a minute;
+  // everything that can still change (statements gain cosignatures, proofs move from queued), and every 404, no-cache.
+  const cc = async (path: string) => (await route(req(path), site)).headers.get("cache-control");
+  assert.equal(await cc("/solidarity/lines/2026-10"), "public, max-age=86400, immutable");
+  assert.equal(await cc("/solidarity/settlements/2026-10"), "public, max-age=86400, immutable");
+  assert.equal(await cc("/solidarity/lines/2026-11"), "no-cache", "not closed yet: 404");
+  for (const path of ["/solidarity", "/solidarity/statements/2026-10", `/solidarity/proofs/${id}`, `/receipts/${id}`, "/.well-known/did.json"]) assert.equal(await cc(path), "no-cache", path);
+  for (const path of ["/", "/status.json"]) assert.equal(await cc(path), "public, max-age=60", path);
 });

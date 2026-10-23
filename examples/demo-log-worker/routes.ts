@@ -30,6 +30,10 @@ export interface Site {
 }
 
 const READ_HEADERS = { "access-control-allow-origin": "*", "cache-control": "no-cache" };
+/** A closed month's lines and settlements never change. */
+const IMMUTABLE = { "cache-control": "public, max-age=86400, immutable" };
+/** The page and its data change at most every tick (6 hours) or alarm. */
+const SHORT = { "cache-control": "public, max-age=60" };
 
 function respond(method: string, status: number, contentType: string, body: string, extra: Record<string, string> = {}): Response {
   return new Response(method === "HEAD" ? null : body, { status, headers: { "content-type": contentType, ...READ_HEADERS, ...extra } });
@@ -68,15 +72,16 @@ export async function route(request: Request, site: Site): Promise<Response> {
 
   if (method !== "GET" && method !== "HEAD") return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
 
-  if (path === "/" || path === "/index.html") return respond(method, 200, "text/html; charset=utf-8", site.page());
-  if (path === "/status.json") return json(method, 200, site.status());
+  if (path === "/" || path === "/index.html") return respond(method, 200, "text/html; charset=utf-8", site.page(), SHORT);
+  if (path === "/status.json") return respond(method, 200, "application/json", JSON.stringify(site.status()), SHORT);
 
   const down = site.degraded();
   if (path === "/solidarity" || path.startsWith("/solidarity/")) {
     if (down) return json(method, 503, { error: `the log is not serving: ${down}` });
     const rest = path.slice("/solidarity".length);
     const r = site.serveLog(rest === "/" ? "" : rest);
-    return respond(method, r.status, r.contentType, r.body);
+    const fixed = r.status === 200 && /^\/(lines|settlements)\/[0-9]{4}-[0-9]{2}$/.test(rest);
+    return respond(method, r.status, r.contentType, r.body, fixed ? IMMUTABLE : {});
   }
   if (path in DID_PATHS) {
     if (down) return json(method, 503, { error: `the log is not serving: ${down}` });

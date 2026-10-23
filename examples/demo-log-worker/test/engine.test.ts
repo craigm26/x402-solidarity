@@ -14,11 +14,12 @@ import { pathToFileURL } from "node:url";
 import * as S from "../../../src/solidarity/index.ts";
 import type { PublishedStatement, Receipt } from "../../../src/solidarity/index.ts";
 import { ROOT, siteFile } from "../../../test/helpers.ts";
-import { ASSET, configFromEnv, endBoundary, FUND, FUND_ADDRESS, usdc } from "../engine.ts";
+import { ASSET, briefError, configFromEnv, DEFAULT_FACILITATOR, endBoundary, Engine, FUND, FUND_ADDRESS, usdc } from "../engine.ts";
 import { exactRefs, fundCheckOf, transferToFund } from "../fundView.ts";
-import { SimWorld, USDC } from "../io.ts";
+import { LiveIO, SimWorld, USDC } from "../io.ts";
 import type { ReceiptFacts } from "../io.ts";
 import { renderPage } from "../page.ts";
+import { MemoryStore, SqlStore } from "../store.ts";
 import { at, collected, HOUR, invariants, published, restart, rig, runUntil, tickAfter } from "./harness.ts";
 import type { Rig } from "./harness.ts";
 
@@ -269,8 +270,8 @@ test("an RPC endpoint that is down defers the fund's cosignature; after 14 days 
   await tickAfter(r, 19 * HOUR); // 2026-12-15T01:00Z
   const refused = r.store.get("fund-refused", "2026-11");
   assert.equal(refused?.body.definitive, false);
-  assert.match(refused?.body.reason, /could not be checked on Base Sepolia before 2026-12-15/);
-  assert.match(renderPage(r.engine.snapshot()), /could not be checked on Base Sepolia before 2026-12-15/);
+  assert.match(refused?.body.reason, /could not be checked on the simulated chain before 2026-12-15/);
+  assert.match(renderPage(r.engine.snapshot()), /could not be checked on the simulated chain before 2026-12-15/);
 });
 
 test("stop conditions are checked before anything is signed", async (t) => {
@@ -331,18 +332,58 @@ test("stop conditions are checked before anything is signed", async (t) => {
     assert.equal(r.engine.degraded, undefined, r.engine.degraded);
     r.world.mint(address, 20_000_000n);
     assert.match((await tickAfter(r, HOUR)).cycle?.stop ?? "", /PAYER_KEY is not set/);
+    // The headline says so: it does not claim purchases are running.
+    const waiting = r.engine.snapshot();
+    assert.equal(waiting.state, "waiting");
+    assert.equal(waiting.waiting, "PAYER_KEY is not set");
+    const html = renderPage(waiting);
+    assert.match(html, /<strong>No purchases\.<\/strong> The last tick, at [^,]+, started no purchase: PAYER_KEY is not set\./);
+    assert.ok(!/<strong>Running\.<\/strong>/.test(html));
     key = "0x1234";
     assert.match((await tickAfter(r, HOUR)).cycle?.stop ?? "", /PAYER_KEY must be 0x followed by 64 hex digits/);
+    // 64 hex digits that are not a secp256k1 key (zero, or at or above the curve order): a clean stop,
+    // and the value never reaches the status, the page or the failure count.
+    for (const bad of [`0x${"00".repeat(32)}`, `0x${"ff".repeat(32)}`, "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"]) {
+      key = bad;
+      const t1 = await tickAfter(r, HOUR);
+      assert.equal(t1.cycle?.stop, "PAYER_KEY is not a valid secp256k1 private key");
+      const out = JSON.stringify(r.engine.snapshot()) + renderPage(r.engine.snapshot());
+      const dec = BigInt(bad).toString();
+      assert.ok((dec.length < 30 || !out.includes(dec)) && !out.toLowerCase().includes(bad.slice(2).toLowerCase()), "the key's value is published");
+      assert.equal(r.store.status("lastError"), undefined);
+      assert.equal(r.store.status("failures") ?? 0, 0);
+    }
     key = generatePrivateKey();
     assert.match((await tickAfter(r, HOUR)).cycle?.stop ?? "", /PAYER_KEY is not the key of the payer/);
     assert.ok(!r.io.calls.includes("settle"));
     key = good;
     const ok = await tickAfter(r, HOUR);
     assert.ok(collected(ok.cycle), JSON.stringify(ok.cycle));
+    assert.equal(r.engine.snapshot().state, "running");
     assert.ok(r.alarms.length >= 2, "live mode arms the alarm for the purchase and the share");
     assert.equal(configFromEnv({ MODE: "live", PUBLIC_ORIGIN: "https://x.example" }).problem, "PAYER_ADDRESS must be set to the payer's address");
     assert.match(configFromEnv({ MODE: "sim", PUBLIC_ORIGIN: "http://127.0.0.1:8850" }).problem ?? "", /https origin/);
     assert.match(configFromEnv({ MODE: "test", PUBLIC_ORIGIN: "https://x.example" }).problem ?? "", /MODE must be/);
+  });
+
+  await t.test("an RPC error on the block number read is a stop, not a failed purchase", async () => {
+    const r = await rig();
+    const real = r.io.blockNumber.bind(r.io);
+    let errors = 3;
+    r.io.blockNumber = async () => {
+      if (errors-- > 0) throw new Error("simulated RPC timeout");
+      return real();
+    };
+    for (let i = 0; i < 3; i++) {
+      const t1 = await tickAfter(r, 6 * HOUR);
+      assert.equal(t1.cycle?.ran, false);
+      assert.match(t1.cycle?.stop ?? "", /^the RPC endpoint did not answer: simulated RPC timeout$/);
+      assert.match(renderPage(r.engine.snapshot()), /No purchases\./);
+    }
+    assert.equal(r.store.status("failures") ?? 0, 0);
+    assert.equal(r.store.status("backoffUntil"), undefined);
+    assert.equal(r.store.events().filter((x) => x.kind === "cycle").length, 0, "nothing was signed");
+    assert.ok(collected((await tickAfter(r, 6 * HOUR)).cycle), "the next tick runs");
   });
 
   await t.test("three failed purchases in a row back off for a day", async () => {
@@ -381,6 +422,32 @@ test("tampered records or changed variables stop the log instead of rewriting it
     assert.match(renderPage(r2.engine.snapshot()), /Stopped\./);
   });
 
+  await t.test("a stored cosignature that does not check", async (tt) => {
+    const cases: Array<[string, string, (b: Record<string, string>, r: Rig) => Record<string, string>, RegExp]> = [
+      ["the fund's JWS broken", "2026-10:fund", (b) => ({ ...b, jws: `${b.jws.slice(0, -6)}AAAAAA` }), /cosignature 2026-10:fund: the signature does not verify/],
+      ["the witness's JWS over other bytes", "2026-10:witness", (b, r) => {
+        const k = r.engine.keys as NonNullable<Rig["engine"]["keys"]>;
+        return { ...b, jws: S.jwsSign(new TextEncoder().encode('{"period":"2026-10"}'), k.witness) };
+      }, /cosignature 2026-10:witness: it signs other bytes than the stored statement/],
+      ["another kid", "2026-10:witness", (b) => ({ ...b, kid: "did:web:demo.example:fund#fund-1" }), /cosignature 2026-10:witness: kid did:web:demo\.example:fund#fund-1 is not the demo witness's key/],
+      ["the fund's JWS stored as the witness's", "2026-10:witness", (b, r) => ({ ...b, jws: r.store.get("cosign", "2026-10:fund")?.body.jws }), /cosignature 2026-10:witness: the JWS header names ES256/],
+      ["a payloadHash that is not the statement's", "2026-10:fund", (b) => ({ ...b, payloadHash: "0".repeat(64) }), /cosignature 2026-10:fund: its payloadHash is not the stored statement's hash/],
+    ];
+    for (const [name, key, change, want] of cases) {
+      await tt.test(name, async () => {
+        const r = await rig({ start: at("2026-10-31T00:00:00Z") });
+        await runUntil(r, at("2026-11-01T06:00:00Z"));
+        assert.ok(r.store.get("cosign", key));
+        r.store.tamper("cosign", key, (b) => change(b, r));
+        const r2 = await restart(r);
+        assert.match(r2.engine.degraded ?? "", want);
+        assert.equal(r2.engine.serve("/statements/2026-10").status, 503);
+        assert.equal(r2.engine.snapshot().statements.length, 0, "the page does not report the cosignatures");
+        assert.match((await tickAfter(r2, 6 * HOUR)).stop ?? "", /degraded/);
+      });
+    }
+  });
+
   await t.test("a recorded decision that replay does not reproduce", async () => {
     const r = await rig({ start: at("2026-10-31T00:00:00Z") });
     await runUntil(r, at("2026-10-31T12:00:00Z"));
@@ -397,6 +464,58 @@ test("tampered records or changed variables stop the log instead of rewriting it
     assert.match(b.engine.degraded ?? "", /simulated and real records never mix/);
     const ok = await restart(base);
     assert.equal(ok.engine.degraded, undefined);
+  });
+});
+
+test("a refusal by the demo witness stops the log for good: no fund cosignature, no later close, across a restart", async (t) => {
+  await t.test("the witness refuses October", async () => {
+    const orig = S.Witness.prototype.cosign;
+    S.Witness.prototype.cosign = function (this: S.Witness, pub: PublishedStatement, ...rest: unknown[]) {
+      if (S.decodeStatement(pub.statement).payload.period === "2026-10") throw new Error("witness refuses: test refusal of October");
+      return (orig as (...a: unknown[]) => S.JwsEnvelope).call(this, pub, ...rest);
+    } as typeof orig;
+    try {
+      const r = await rig({ start: at("2026-10-31T00:00:00Z") });
+      await runUntil(r, at("2026-10-31T18:00:00Z"));
+      const t1 = await tickAfter(r, 6 * HOUR); // 2026-11-01T00:00Z closes October
+      assert.ok(t1.maintained.includes("closed 2026-10"));
+      assert.match(r.engine.degraded ?? "", /^the demo witness refuses 2026-10: witness refuses: test refusal of October$/);
+      assert.equal(r.store.get("witness-refused", "2026-10")?.body.reason, "witness refuses: test refusal of October");
+      assert.equal(r.store.get("cosign", "2026-10:witness"), undefined);
+      assert.equal(r.store.get("cosign", "2026-10:fund"), undefined, "the fund never cosigns a month the witness refused");
+      assert.match(t1.cycle?.stop ?? "", /degraded/);
+      // A restart keeps it stopped.
+      const r2 = await restart(r);
+      assert.match(r2.engine.degraded ?? "", /^the demo witness refuses 2026-10/);
+      assert.equal(r2.engine.serve("/statements/2026-10").status, 503);
+      assert.match(renderPage(r2.engine.snapshot()), /Stopped\./);
+      // And November is never closed or cosigned.
+      r2.io.advance(30 * 86400);
+      const t2 = await r2.engine.tick();
+      assert.match(t2.stop ?? "", /degraded: the demo witness refuses 2026-10/);
+      assert.deepEqual(t2.maintained, []);
+      assert.deepEqual(await r2.engine.maintain(), []);
+      for (const k of ["close-intent", "close"] as const) assert.equal(r2.store.get(k, "2026-11"), undefined);
+      assert.equal(r2.store.events().filter((e) => e.kind === "cosign").length, 0);
+      assert.equal(r2.store.events().filter((e) => e.kind === "cycle" && e.at > at("2026-11-01T00:00:00Z")).length, 0);
+    } finally {
+      S.Witness.prototype.cosign = orig;
+    }
+  });
+
+  await t.test("the witness's memory is its own stored cosignatures, not the log's book", async () => {
+    const r = await rig({ start: at("2026-10-31T00:00:00Z") });
+    await runUntil(r, at("2026-11-01T06:00:00Z"));
+    assert.ok(r.store.get("cosign", "2026-10:witness"));
+    // As if the witness had cosigned another October payload: November's previous no longer chains to it.
+    r.store.tamper("cosign", "2026-10:witness", (b) => ({ ...b, payloadHash: "ab".repeat(32) }));
+    r.io.advance(30 * 86400 - 6 * HOUR); // 2026-12-01T00:00Z
+    const t1 = await r.engine.tick();
+    assert.ok(t1.maintained.includes("closed 2026-11"));
+    assert.match(r.engine.degraded ?? "", /the demo witness refuses 2026-11: previous does not chain to the statement it cosigned for the month before/);
+    assert.ok(r.store.get("witness-refused", "2026-11"));
+    assert.equal(r.store.get("cosign", "2026-11:witness"), undefined);
+    assert.equal(r.store.get("cosign", "2026-11:fund"), undefined);
   });
 });
 
@@ -437,6 +556,16 @@ test("the page says what is real and what is simulated, with no scripts, no exte
   assert.ok(!/<link/i.test(html), "no external stylesheets or fonts");
   assert.ok(!/@import|url\(/.test(html), "no external CSS");
   assert.ok(!new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]`).test(html));
+  // A simulated log never says it read anything on Base Sepolia.
+  assert.match(html, /it read every listed transaction on the repository's simulated chain/);
+  assert.ok(!/on Base Sepolia/.test(html), "the simulated page claims Base Sepolia");
+  // The facilitator line names the public facilitator (which pays the gas) only when it is the one configured.
+  const snap = r.engine.snapshot();
+  const live = (facilitator: string) => renderPage({ ...snap, mode: "live", facilitator, statements: [] });
+  assert.match(live(DEFAULT_FACILITATOR), /through the public x402 facilitator at <code>https:\/\/x402\.org\/facilitator<\/code>, which pays the gas/);
+  const other = live("https://facilitator.other.example");
+  assert.match(other, /through the x402 facilitator at <code>https:\/\/facilitator\.other\.example<\/code>\./);
+  assert.ok(!/public x402 facilitator|pays the gas/.test(other));
   assert.equal(usdc(1500000n), "1.5");
   assert.equal(usdc(1000n), "0.001");
   assert.equal(usdc(2000000n), "2");
@@ -463,4 +592,61 @@ test("wrangler.jsonc: one SQLite Durable Object, the cron, vars only (no secret)
     const src = readFileSync(join(DIR, f), "utf8");
     assert.equal(/from "cloudflare:workers"/.test(src), f === "worker.ts", f);
   }
+});
+
+test("an RPC error is published as a short reason: no URL (an RPC_URL can carry a credential) and no request body", async () => {
+  // A closed local port: the connection is refused, nothing leaves this machine.
+  const { createServer } = await import("node:net");
+  const port = await new Promise<number>((done) => {
+    const srv = createServer().listen(0, "127.0.0.1", () => {
+      const p = (srv.address() as { port: number }).port;
+      srv.close(() => done(p));
+    });
+  });
+  const secret = "PRETEND-PROVIDER-API-KEY";
+  const rpcUrl = `http://127.0.0.1:${port}/v2/${secret}`;
+  const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
+  const key = generatePrivateKey();
+  const config = { ...configFromEnv({ MODE: "live", PUBLIC_ORIGIN: "https://demo.example", PAYER_ADDRESS: privateKeyToAccount(key).address, RPC_URL: rpcUrl }) };
+  const engine = new Engine({ store: new MemoryStore(), io: new LiveIO({ rpcUrl, facilitatorUrl: "https://facilitator.invalid" }), config, payerKey: () => key });
+  await engine.boot();
+  assert.equal(engine.degraded, undefined, engine.degraded);
+  const t1 = await engine.tick();
+  assert.match(t1.cycle?.stop ?? "", /^the RPC endpoint did not answer: /);
+  const out = [JSON.stringify(t1), JSON.stringify(engine.snapshot()), renderPage(engine.snapshot())];
+  for (const o of out) {
+    assert.ok(!o.includes(secret), `published: ${t1.cycle?.stop}`);
+    assert.ok(!o.includes(`127.0.0.1:${port}`));
+    assert.ok(!o.includes("eth_chainId"), "the request body is published");
+  }
+  // briefError: viem's short message, first line only, no URL, no long number.
+  const { HttpRequestError } = await import("viem");
+  assert.equal(briefError(new HttpRequestError({ url: rpcUrl, body: { method: "eth_chainId" }, status: 401, details: "unauthorized" })), "HTTP request failed.");
+  assert.equal(briefError(new Error(`fetch ${rpcUrl} failed\nsecond line`)), "fetch <url> failed");
+  assert.equal(briefError(new Error(`expected valid private key: 1 <= n < 1157920892373161954235709850086879078528375642790749043826051631415181614943, got ${BigInt(`0x${"ff".repeat(32)}`)}`)), "expected valid private key: 1 <= n < <number>, got <number>");
+  assert.equal(briefError(new Error("UNIQUE constraint failed: events result submit:0x1234567890123456789012345678901234567890123456789012345678901234")), "UNIQUE constraint failed: events result submit:0x1234567890123456789012345678901234567890123456789012345678901234", "transaction hashes and nonces stay");
+});
+
+test("store.ts: recent() reads the newest rows of one kind through the (kind, seq) index, in node:sqlite", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  const storage = {
+    sql: {
+      exec: (q: string, ...b: unknown[]) => {
+        const rows = db.prepare(q).all(...(b as never[])) as Record<string, unknown>[];
+        return { toArray: () => rows };
+      },
+    },
+  };
+  const store = new SqlStore(storage);
+  for (let i = 0; i < 50; i++) {
+    store.append("cycle", `c${i}`, i, { n: i });
+    store.append("settled", `c${i}`, i, { n: i });
+  }
+  assert.deepEqual(store.recent("cycle", 3).map((e) => e.body.n), [49, 48, 47]);
+  const plan = db.prepare("EXPLAIN QUERY PLAN SELECT seq, at, kind, key, body FROM events WHERE kind = ? ORDER BY seq DESC LIMIT ?").all("cycle", 20).map((x) => String((x as { detail: string }).detail));
+  assert.deepEqual(plan, ["SEARCH events USING INDEX events_kind_seq (kind=?)"], "no sort of every row of the kind");
+  // The index is added to a store created before it existed, too.
+  const store2 = new SqlStore(storage);
+  assert.equal(store2.events().length, 100);
 });

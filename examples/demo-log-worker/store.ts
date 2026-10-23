@@ -25,6 +25,8 @@ const SCHEMA = [
     body TEXT NOT NULL,
     UNIQUE (kind, key)
   )`,
+  // recent(): the newest rows of one kind without reading and sorting every row of that kind.
+  "CREATE INDEX IF NOT EXISTS events_kind_seq ON events (kind, seq)",
   "CREATE TABLE IF NOT EXISTS keys (name TEXT PRIMARY KEY, alg TEXT NOT NULL, kid TEXT NOT NULL, jwk TEXT NOT NULL, created INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS status (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS sim_ops (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, op TEXT NOT NULL, body TEXT NOT NULL)",

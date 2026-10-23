@@ -159,6 +159,34 @@ export interface TickReport {
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/**
+ * An error text that is safe to publish (on the page, at /status.json, in a
+ * recorded stop): viem's short message when there is one, its first line
+ * only, no URL (an RPC_URL can carry a provider's credential), and no long
+ * number (an error about a key can print it).
+ */
+export function briefError(e: unknown): string {
+  const short = (e as { shortMessage?: unknown } | undefined)?.shortMessage;
+  const text = typeof short === "string" && short ? short : msg(e);
+  return (text.split("\n")[0] ?? "")
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*/gi, "<url>")
+    .replace(/(?<![0-9a-fA-Fx])[0-9]{30,}(?![0-9a-fA-F])/g, "<number>")
+    .slice(0, 300);
+}
+
+/**
+ * Not a failure, not an answer: the chain says an authorization was used but
+ * its transfer could not be read yet (a log index behind the node that
+ * answered). Nothing is recorded; the cycle stays unfinished and the alarm
+ * or the next tick looks again.
+ */
+export class NotYet extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotYet";
+  }
+}
+
 /** Atomic units of USDC (6 decimals) as a decimal string: 1500000 gives "1.5". */
 export function usdc(units: bigint | string): string {
   const v = BigInt(units);
@@ -167,6 +195,8 @@ export function usdc(units: bigint | string): string {
   const frac = (a % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
   return `${neg ? "-" : ""}${a / 1_000_000n}${frac ? `.${frac}` : ""}`;
 }
+
+const witnessRefusal = (period: string, reason: string): string => `the demo witness refuses ${period}: ${reason}`;
 
 function summarize(outcome: SolidarityOutcome | undefined, rec: { state?: string; exact?: { transaction?: string } } | undefined): Summary {
   return {
@@ -265,6 +295,7 @@ export class Engine {
 
     const problems: string[] = [];
     const replayed = new Map<string, Summary>();
+    let refused: EventRow | undefined;
     for (const e of this.store.events()) {
       if (e.at > this.lastAt) this.lastAt = e.at;
       this.logNow = e.at;
@@ -294,8 +325,16 @@ export class Engine {
           if (S.statementHash(S.decodeStatement(pub.statement).payload) !== e.body.hash) problems.push(`statement ${e.body.period}: hash differs from the record`);
           break;
         }
-        case "cosign":
-          this.log.addCosignature(e.body.period, { format: "jws", signature: e.body.jws });
+        case "cosign": {
+          // Checked as a statement is: a stored cosignature is re-added only if it is the demo
+          // witness's or fund's valid signature over exactly the stored statement's payload.
+          const why = this.cosignProblem(e);
+          if (why) problems.push(`cosignature ${e.key}: ${why}`);
+          else this.log.addCosignature(e.body.period, { format: "jws", signature: e.body.jws });
+          break;
+        }
+        case "witness-refused":
+          refused ??= e;
           break;
         default:
           break; // genesis, intent, result, lookup, close-intent, fund-check, fund-refused: read by key when needed
@@ -304,6 +343,31 @@ export class Engine {
     problems.push(...this.journal.divergence);
     if (problems.length) throw new Error(problems.join("; "));
     this.journal.mode = "live";
+    // A witness refusal stops the log for good: nothing is closed or cosigned after it.
+    if (refused) this.degraded = witnessRefusal(refused.body.period, refused.body.reason);
+  }
+
+  /** Why a stored cosign row must not be re-added, or undefined. */
+  private cosignProblem(e: EventRow): string | undefined {
+    const b = e.body;
+    const role = b?.role;
+    if ((role !== "witness" && role !== "fund") || e.key !== `${b.period}:${role}`) return "not the demo witness's or the demo fund's";
+    const key = (this.keys as Record<DidRole, SigningKey>)[role as DidRole];
+    if (b.kid !== key.kid) return `kid ${b.kid} is not the demo ${role}'s key ${key.kid}`;
+    const closed = (this.log as S.SolidarityLog).book.get(b.period);
+    const close = this.store.get("close", b.period);
+    if (!closed || !close) return `${b.period} has no stored statement`;
+    let d: ReturnType<typeof S.jwsDecode>;
+    try {
+      d = S.jwsDecode(b.jws);
+    } catch (err) {
+      return msg(err);
+    }
+    if (d.header.kid !== key.kid || d.header.alg !== key.alg) return `the JWS header names ${d.header.alg} ${d.header.kid}, not ${key.alg} ${key.kid}`;
+    if (Buffer.compare(Buffer.from(d.payloadBytes), Buffer.from(S.decodeStatement(closed.pub.statement).bytes)) !== 0) return "it signs other bytes than the stored statement";
+    if (!S.jwsVerify(b.jws, key.publicKey)) return "the signature does not verify";
+    if (b.payloadHash !== close.body.hash) return "its payloadHash is not the stored statement's hash";
+    return undefined;
   }
 
   private async createGenesis(): Promise<EventRow> {
@@ -416,7 +480,9 @@ export class Engine {
    * never taken as final: the chain decides, once the authorization is used
    * or expired. Resubmission happens only when the chain shows it unused, at
    * least RESUBMIT_GAP after the last try, with MIN_VALIDITY left; EIP-3009
-   * nonces make a second execution impossible anyway.
+   * nonces make a second execution impossible anyway. A used authorization
+   * whose transfer the log search does not show yet throws NotYet, so no
+   * answer is recorded until the transfer is found.
    */
   private async execute(accepted: PaymentRequirements, payload: ExactEip3009Payload, o: { intentAt: number; fresh: boolean; cycle: EventRow }): Promise<SubmitAnswer> {
     const a = payload.authorization;
@@ -428,9 +494,13 @@ export class Engine {
     let check = !o.fresh;
     for (;;) {
       if (check && (await this.io.authorizationState(a.from, a.nonce))) {
-        const t = await this.io.findTransfer(accepted, payload, this.windowFor(o.cycle, payload));
+        const w = this.windowFor(o.cycle, payload);
+        const t = await this.io.findTransfer(accepted, payload, w);
         if (t && sameAccount(t.to, a.to) && t.value === BigInt(a.value)) return { ok: true, transaction: t.transaction, via: "chain" };
-        return { ok: false, error: "the authorization was used, but its transfer was not found in the expected blocks", via: "chain" };
+        if (t) return { ok: false, error: `the authorization was used by ${t.transaction}, which is not a transfer of ${a.value} to ${a.to}`, via: "chain" };
+        // Used, so it executed, but the log search does not show it yet (an RPC whose log index
+        // lags the node that answered). Never final: the cycle stays unfinished and is looked up again.
+        throw new NotYet(`the authorization ${a.nonce.toLowerCase()} was used, but its transfer is not found yet in blocks ${w.fromBlock} to ${w.toBlock}; it is looked up again on the next alarm or tick`);
       }
       check = true;
       const now = this.io.now();
@@ -533,9 +603,12 @@ export class Engine {
   }
 
   private async afterError(e: unknown): Promise<void> {
+    // Only a purchase that was under way counts toward the backoff, and a transfer that is
+    // only not readable yet does not: neither an RPC error before signing nor a close does.
+    const counts = this.current !== undefined && !(e instanceof NotYet);
     try {
-      this.store.setStatus("lastError", { at: this.io.now(), error: msg(e) });
-      this.bumpFailures(false);
+      this.store.setStatus("lastError", { at: this.io.now(), error: briefError(e) });
+      if (counts) this.bumpFailures(false);
     } catch {
       // the store itself failed; the rebuild below will say so
     }
@@ -575,30 +648,48 @@ export class Engine {
 
   /** Why no cycle may start now, or undefined. Checked before anything is signed. */
   async stopReason(): Promise<string | undefined> {
-    if (this.degraded) return `degraded: ${this.degraded}`;
-    if (this.config.paused) return "paused (PAUSED is 1)";
+    const p = await this.preflight();
+    return "stop" in p ? p.stop : undefined;
+  }
+
+  /**
+   * The stop conditions, in order, and what a cycle needs if none applies:
+   * the payer's account and the block read before signing. Never throws on
+   * a bad key or an RPC error: each is a stop, with a text safe to publish.
+   */
+  private async preflight(): Promise<{ stop: string } | { account: ReturnType<typeof privateKeyToAccount>; block: bigint }> {
+    const stop = (s: string) => ({ stop: s });
+    if (this.degraded) return stop(`degraded: ${this.degraded}`);
+    if (this.config.paused) return stop("paused (PAUSED is 1)");
     const end = endBoundary(this.config.endDate);
-    if (end === undefined) return `END_DATE ${this.config.endDate} is not a YYYY-MM-DD date`;
-    if (this.io.now() >= end) return `ended: END_DATE ${this.config.endDate} has passed`;
-    if (this.unfinished) return `cycle ${this.unfinished.body.n} is unfinished`;
+    if (end === undefined) return stop(`END_DATE ${this.config.endDate} is not a YYYY-MM-DD date`);
+    if (this.io.now() >= end) return stop(`ended: END_DATE ${this.config.endDate} has passed`);
+    if (this.unfinished) return stop(`cycle ${this.unfinished.body.n} is unfinished`);
     const until = Number(this.store.status("backoffUntil") ?? 0);
-    if (this.io.now() < until) return `${FAILURES_BEFORE_BACKOFF} cycles failed in a row; waiting until ${new Date(until * 1000).toISOString()}`;
+    if (this.io.now() < until) return stop(`${FAILURES_BEFORE_BACKOFF} cycles failed in a row; waiting until ${new Date(until * 1000).toISOString()}`);
+    const name = this.config.mode === "live" ? "PAYER_KEY" : "the simulated payer key";
     const hex = this.payerHex();
-    if (!hex) return this.config.mode === "live" ? "PAYER_KEY is not set" : "the simulated payer key is missing";
-    if (!/^0x[0-9a-fA-F]{64}$/.test(hex)) return "PAYER_KEY must be 0x followed by 64 hex digits";
-    const address = privateKeyToAccount(hex as `0x${string}`).address;
-    if (!sameAccount(address, (this.genesis as Genesis).payer)) return "PAYER_KEY is not the key of the payer this log was created with";
-    if (this.config.mode === "live" && !sameAccount(address, this.config.payerAddress)) return "PAYER_KEY is not the key of PAYER_ADDRESS";
+    if (!hex) return stop(this.config.mode === "live" ? "PAYER_KEY is not set" : "the simulated payer key is missing");
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hex)) return stop(`${name} must be 0x followed by 64 hex digits`);
+    let account: ReturnType<typeof privateKeyToAccount>;
+    try {
+      account = privateKeyToAccount(hex as `0x${string}`);
+    } catch {
+      // Zero, or at or above the curve order. The thrown text holds the value, so it is never kept.
+      return stop(`${name} is not a valid secp256k1 private key`);
+    }
+    if (!sameAccount(account.address, (this.genesis as Genesis).payer)) return stop(`${name} is not the key of the payer this log was created with`);
+    if (this.config.mode === "live" && !sameAccount(account.address, this.config.payerAddress)) return stop("PAYER_KEY is not the key of PAYER_ADDRESS");
     try {
       const id = await this.io.chainId();
-      if (id !== CHAIN_ID) return `the RPC endpoint reports chain ${id}, not Base Sepolia (${CHAIN_ID})`;
-      const balance = await this.io.balanceOf(address);
+      if (id !== CHAIN_ID) return stop(`the RPC endpoint reports chain ${id}, not Base Sepolia (${CHAIN_ID})`);
+      const balance = await this.io.balanceOf(account.address);
       this.store.setStatus("lastBalance", { at: this.io.now(), balance: balance.toString() });
-      if (balance < MIN_BALANCE) return `the payer holds ${usdc(balance)} USDC, below 2 USDC`;
+      if (balance < MIN_BALANCE) return stop(`the payer holds ${usdc(balance)} USDC, below 2 USDC`);
+      return { account, block: await this.io.blockNumber() };
     } catch (e) {
-      return `the RPC endpoint did not answer: ${msg(e)}`;
+      return stop(`the RPC endpoint did not answer: ${briefError(e)}`);
     }
-    return undefined;
   }
 
   private payerHex(): string | undefined {
@@ -610,13 +701,12 @@ export class Engine {
   }
 
   private async cycleInner(): Promise<CycleReport> {
-    const stop = await this.stopReason();
-    if (stop) return { ran: false, stop };
-    const account = privateKeyToAccount(this.payerHex() as `0x${string}`);
+    const pre = await this.preflight();
+    if ("stop" in pre) return { ran: false, stop: pre.stop };
+    const { account, block } = pre;
     const log = this.log as S.SolidarityLog;
     const now = this.liveNow();
     const real = this.io.now();
-    const block = await this.io.blockNumber();
     const balance = String(this.store.status("lastBalance")?.balance ?? "");
     // A 1 USDC exact purchase from the payer to itself, signed as any x402 client signs one.
     const purchase: PaymentRequirements = { scheme: "exact", network: NETWORK, amount: PURCHASE_AMOUNT, asset: USDC_ADDRESS, payTo: account.address, maxTimeoutSeconds: WINDOW_SECONDS, extra: { name: "USDC", version: "2" } };
@@ -707,7 +797,8 @@ export class Engine {
       this.append("close", p, intent.at, { period: p, issuedAt: intent.body.issuedAt, jws: pub.statement.signature, hash: S.statementHash(S.decodeStatement(pub.statement).payload) });
     }
     await this.cosignWitness(p);
-    await this.cosignFund(p);
+    // A refusal by the witness stops everything after it, the fund's cosignature included.
+    if (!this.degraded) await this.cosignFund(p);
   }
 
   private resolver(): S.KeyResolver {
@@ -727,7 +818,9 @@ export class Engine {
   private async cosignPending(): Promise<string[]> {
     const notes: string[] = [];
     for (const p of this.closedPeriods()) {
+      if (this.degraded) break;
       if (!this.store.get("cosign", `${p}:witness`)) await this.cosignWitness(p);
+      if (this.degraded) break;
       if (!this.store.get("cosign", `${p}:fund`) && !this.store.get("fund-refused", p)) {
         await this.cosignFund(p);
         if (this.store.get("cosign", `${p}:fund`)) notes.push(`fund cosigned ${p}`);
@@ -738,21 +831,33 @@ export class Engine {
 
   /**
    * The demo witness. A fresh Witness remembers nothing across restarts, so the
-   * engine enforces its memory: `previous` must be the hash of the statement it
-   * cosigned for the month before (or null for the log's first month), and it
-   * never cosigns a second payload for a month.
+   * engine keeps its memory in the witness's own stored cosign rows: `previous`
+   * must be the payloadHash it cosigned for the month before (or null for the
+   * log's first month), it cosigns months in order, and it never cosigns a
+   * second payload for a month. A refusal is recorded (witness-refused) and
+   * stops the log, across restarts too.
    */
   private async cosignWitness(p: string): Promise<void> {
-    if (this.store.get("cosign", `${p}:witness`)) return;
+    if (this.degraded || this.store.get("cosign", `${p}:witness`)) return;
     const log = this.log as S.SolidarityLog;
     const closed = log.book.get(p);
     if (!closed) throw new Error(`${p} is not closed`);
     const d = S.decodeStatement(closed.pub.statement);
     const g = this.genesis as Genesis;
-    const prev = p === g.keyFrom ? undefined : log.book.get(previousPeriod(p));
-    const want = p === g.keyFrom ? null : prev ? S.statementHash(prev.payload) : "missing";
+    let want: string | null = null;
+    if (p !== g.keyFrom) {
+      const before = previousPeriod(p);
+      // In order: a month before that was closed but not cosigned yet (a restart in between) comes first.
+      if (!this.store.get("cosign", `${before}:witness`) && log.book.get(before)) await this.cosignWitness(before);
+      if (this.degraded) return;
+      want = this.store.get("cosign", `${before}:witness`)?.body.payloadHash ?? "missing";
+    }
+    const refuse = (reason: string): void => {
+      this.append("witness-refused", p, this.liveNow(), { period: p, reason });
+      this.degraded = witnessRefusal(p, reason);
+    };
     if (d.payload.previous !== want) {
-      this.degraded = `the demo witness refuses ${p}: previous does not chain to the statement it cosigned for the month before`;
+      refuse(want === "missing" ? "it has not cosigned the month before" : "previous does not chain to the statement it cosigned for the month before");
       return;
     }
     const k = this.keys as Record<DidRole, SigningKey>;
@@ -760,7 +865,7 @@ export class Engine {
     try {
       env = new S.Witness(k.witness).cosign(closed.pub, { resolveKey: this.resolver(), descriptor: this.descriptor, files: { lines: closed.lines, settlements: closed.settlements } });
     } catch (e) {
-      this.degraded = `the demo witness refuses ${p}: ${msg(e)}`;
+      refuse(msg(e));
       return;
     }
     this.append("cosign", `${p}:witness`, this.liveNow(), { period: p, role: "witness", kid: k.witness.kid, jws: env.signature, payloadHash: d.hash });
@@ -819,7 +924,7 @@ export class Engine {
     }
     if (checks.size < txs.length) {
       const deadline = periodStart(nextPeriod(p)) + FUND_DEADLINE_SECONDS;
-      if (this.io.now() >= deadline) refuse(`the transfers could not be checked on Base Sepolia before ${new Date(deadline * 1000).toISOString().slice(0, 10)}`, false);
+      if (this.io.now() >= deadline) refuse(`the transfers could not be checked on ${this.config.mode === "sim" ? "the simulated chain" : "Base Sepolia"} before ${new Date(deadline * 1000).toISOString().slice(0, 10)}`, false);
       else await this.armAlarm(this.io.now() + 3600);
       return;
     }
@@ -841,7 +946,16 @@ export class Engine {
   /** The log's five endpoints, exactly as SolidarityLog.handle serves them (503 while degraded). */
   serve(path: string): { status: number; contentType: string; body: string } {
     if (this.degraded || !this.log) return { status: 503, contentType: "application/json", body: JSON.stringify({ error: `the log is not serving: ${this.degraded ?? "not booted"}` }) };
-    return this.log.handle(path);
+    const r = this.log.handle(path);
+    // Replay leaves out the unfinished tail cycle until it is finished live, so after a restart
+    // the log does not know a share it had already accepted (its intent or result row says so).
+    // That share is queued, never "never accepted".
+    const tail = this.unfinished;
+    if (r.status === 404 && tail && path === `/proofs/${tail.body.share.id}`) {
+      const nonce = String(tail.body.share.info.payment.payload.authorization.nonce).toLowerCase();
+      if (this.store.get("intent", `submit:${nonce}`) || this.store.get("result", `submit:${nonce}`)) return { status: 200, contentType: "application/json", body: JSON.stringify({ status: "queued" }) };
+    }
+    return r;
   }
 
   receipt(id: string): unknown | undefined {
@@ -859,7 +973,11 @@ export class Engine {
     const g = this.genesis;
     const now = this.io.now();
     const end = endBoundary(this.config.endDate);
-    const state = this.degraded ? "degraded" : this.config.paused ? "paused" : end !== undefined && now >= end ? "ended" : "running";
+    // "waiting": the last tick stopped before signing for a reason of its own (no PAYER_KEY, a low
+    // balance, the RPC endpoint), so the headline must not say purchases are running.
+    const lastTick = this.store.status("lastTick");
+    const waiting = typeof lastTick?.stop === "string" && !/^cycle [0-9]+ is unfinished$/.test(lastTick.stop) ? (lastTick.stop as string) : null;
+    const state = this.degraded ? "degraded" : this.config.paused ? "paused" : end !== undefined && now >= end ? "ended" : waiting ? "waiting" : "running";
     const log = this.log;
     const cycles: CycleView[] = [];
     if (log && !this.degraded) {
@@ -913,7 +1031,8 @@ export class Engine {
       fund: FUND,
       facilitator: this.config.mode === "live" ? this.config.facilitatorUrl : null,
       balance: lastBalance ? { at: lastBalance.at, units: lastBalance.balance } : null,
-      lastTick: this.store.status("lastTick") ?? null,
+      lastTick: lastTick ?? null,
+      waiting: state === "waiting" ? waiting : null,
       lastError: this.store.status("lastError") ?? null,
       backoffUntil: Number(this.store.status("backoffUntil") ?? 0) > now ? Number(this.store.status("backoffUntil")) : null,
       unfinished: this.unfinished?.body.n ?? null,
@@ -950,8 +1069,10 @@ export interface StatementView {
 
 export interface Snapshot {
   mode: Mode;
-  state: "running" | "paused" | "ended" | "degraded";
+  state: "running" | "waiting" | "paused" | "ended" | "degraded";
   degraded: string | null;
+  /** Why the last tick started no purchase, while that is the state. */
+  waiting: string | null;
   paused: boolean;
   endDate: string;
   now: number;

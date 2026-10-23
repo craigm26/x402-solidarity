@@ -24,6 +24,7 @@ import type { ExactEip3009Payload, LogChain, PaymentRequirements, VoucherFields 
  * - cosign: the demo witness's or the demo fund's cosignature, stored and re-added on replay
  * - fund-check: what the demo fund read on chain about one settlement transaction
  * - fund-refused: the demo fund did not cosign a month, and why
+ * - witness-refused: the demo witness refused a month; the log stops for good (replay keeps it stopped)
  */
 export type Kind =
   | "genesis"
@@ -37,7 +38,8 @@ export type Kind =
   | "close"
   | "cosign"
   | "fund-check"
-  | "fund-refused";
+  | "fund-refused"
+  | "witness-refused";
 
 // Bodies are JSON with bigints as decimal strings, so `any` is the honest type here.
 export type Body = any;

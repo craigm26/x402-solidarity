@@ -16,6 +16,8 @@
   // Never rename or delete this class: its storage holds the log's records and keys.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DemoLogObject"] }],
   // One tick every 6 hours. The 00:00 UTC tick on the 1st closes the month before.
+  // PUBLIC_ORIGIN must be the URL this Worker is deployed at before the first deploy: the log pins it.
+  // RPC_URL is a plain var: never a URL that carries a provider's credential.
   "triggers": { "crons": ["0 */6 * * *"] },
   "vars": {
     "MODE": "live",
