@@ -18,7 +18,8 @@
  *    log has not decided by then (a slow scheme verify, or a channel share
  *    waiting for the channel's lock while a claim is on chain), the purchase's
  *    response goes out without a solidarity entry and the decision finishes in
- *    the background, where it shows at /proofs/<id>.
+ *    the background, where it shows at /proofs/<id>. A late decision can still
+ *    accept the share, and its value still moves; the buyer just is not told.
  * 5. A share problem never changes a core field of the purchase's
  *    SettleResponse. The hook never throws, and it puts the core fields back
  *    and drops its entry if they ever differ afterwards.
@@ -41,6 +42,17 @@
  * after-settle hook, so the share would never be processed. An operator who
  * recovers settles calls `await solidarity.afterSettle({ ...ctx, result })`
  * on the recovered result before returning it.
+ *
+ * One decision per settle call. x402Facilitator hands the same paymentPayload
+ * object to every hook of one settle() call, and a later after-settle hook
+ * that throws sends a settle the kit has already decided on to
+ * onSettleFailure (and to facilitatorFetchHandler's catch). So afterSettle
+ * remembers its outcome per paymentPayload object and, called again on the
+ * same settle, puts that outcome on the new result instead of deciding again
+ * (which would answer `duplicate`, or `purchase-not-final` for a share that
+ * was accepted and is being paid). attachSolidarity's before-settle hook
+ * forgets it when a new settle() call starts with that object, as the seller's
+ * one retry of a settlement_pending purchase does in process.
  * An operator who would rather not rely on any of this uses `process()` around
  * its own settle call instead (see the README).
  *
@@ -51,7 +63,7 @@
  * its validBefore is too close for the log to accept it (`expireHeld`).
  */
 
-import type { FacilitatorSettleResultContext, x402Facilitator } from "@x402/core/facilitator";
+import type { FacilitatorSettleContext, FacilitatorSettleResultContext, x402Facilitator } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import { snapshotSettleResponseCore } from "@x402/core/server";
 import { SOLIDARITY, withOutcome } from "../../../src/solidarity/index.ts";
@@ -113,9 +125,19 @@ export interface SolidarityFacilitator {
   process(paymentPayload: PaymentPayload, requirements: PaymentRequirements, result: SettleResponse): Promise<ProcessResult>;
   /**
    * The x402Facilitator after-settle hook. Total: it never throws. Also for an
-   * operator's onSettleFailure hook, on a result it recovers.
+   * operator's onSettleFailure hook, on a result it recovers. It decides once
+   * per settle call: called again with the same paymentPayload object (a later
+   * after-settle hook threw, and the settle reached onSettleFailure or
+   * facilitatorFetchHandler's catch), it puts the outcome it already gave on
+   * `ctx.result` instead of deciding again.
    */
   afterSettle(ctx: FacilitatorSettleResultContext): Promise<void>;
+  /**
+   * The x402Facilitator before-settle hook (attachSolidarity registers it): a
+   * new settle() call with a paymentPayload object afterSettle has seen gets a
+   * new decision. Never aborts the settle.
+   */
+  beforeSettle(ctx: FacilitatorSettleContext): Promise<void>;
   /**
    * For an operator's receipt watcher: a settlement_pending purchase confirmed
    * or failed. The buyer already has its response; the result shows at /proofs/<id>.
@@ -157,6 +179,9 @@ export function solidarityFacilitator(opts: SolidarityFacilitatorOptions): Solid
   const heldUntil = new Map<string, number | undefined>();
   const running = new Set<Promise<void>>();
   const timeoutMs = opts.decisionTimeoutMs ?? 2000;
+  // The outcome given to each settle call, by the paymentPayload object its hooks share.
+  const decided = new WeakMap<object, Promise<SolidarityOutcome | undefined>>();
+  const isObject = (x: unknown): x is object => typeof x === "object" && x !== null;
   const report = (e: unknown, where: string) => {
     try {
       opts.onError?.(e, where);
@@ -251,10 +276,20 @@ export function solidarityFacilitator(opts: SolidarityFacilitatorOptions): Solid
     const prevExtensions = result.extensions;
     const prevResponses = result.extensionResponses;
     try {
-      const r = await process(ctx.paymentPayload, ctx.requirements, result);
-      if (r.outcome) {
-        result.extensions = r.response.extensions;
-        result.extensionResponses = r.response.extensionResponses;
+      const key = ctx.paymentPayload;
+      let outcome = isObject(key) ? decided.get(key) : undefined;
+      if (!outcome) {
+        // Recorded before the log runs, so even a log that throws is not asked twice about one settle.
+        const work = process(ctx.paymentPayload, ctx.requirements, result).then((r) => r.outcome);
+        outcome = work.catch(() => undefined);
+        if (isObject(key)) decided.set(key, outcome);
+        await work;
+      }
+      const o = await outcome;
+      if (o) {
+        const [, , r] = asLog(ctx.paymentPayload, ctx.requirements, result);
+        result.extensions = (withOutcome(r, o) as unknown as SettleResponse).extensions;
+        result.extensionResponses = { ...(result.extensionResponses ?? {}), [SOLIDARITY]: { status: o.status } };
       }
     } catch (e) {
       report(e, "afterSettle");
@@ -271,6 +306,10 @@ export function solidarityFacilitator(opts: SolidarityFacilitatorOptions): Solid
     }
   }
 
+  async function beforeSettle(ctx: FacilitatorSettleContext): Promise<void> {
+    if (isObject(ctx?.paymentPayload)) decided.delete(ctx.paymentPayload);
+  }
+
   async function resolvePending(transaction: string, confirmed: boolean, finalResponse?: SettleResponse) {
     const r = await log.resolvePending(transaction, confirmed, finalResponse as unknown as SolidaritySettleResponse | undefined);
     release(transaction);
@@ -282,19 +321,23 @@ export function solidarityFacilitator(opts: SolidarityFacilitatorOptions): Solid
     while (running.size > 0) await Promise.all([...running]);
   }
 
-  return { key: SOLIDARITY, log, held, process, afterSettle, resolvePending, expireHeld, drain };
+  return { key: SOLIDARITY, log, held, process, afterSettle, beforeSettle, resolvePending, expireHeld, drain };
 }
 
 /**
- * Register the extension and its after-settle hook on an x402Facilitator.
- * Other after-settle hooks the operator registers must never throw either: a
- * throwing hook turns a settled purchase into a failed settle in x402Facilitator.
- * A settle recovered in onSettleFailure skips after-settle hooks: run
- * `solidarity.afterSettle({ ...ctx, result })` on the recovered result there.
+ * Register the extension and its before- and after-settle hooks on an
+ * x402Facilitator. Other after-settle hooks the operator registers must never
+ * throw either: a throwing hook turns a settled purchase into a failed settle
+ * in x402Facilitator. If one does, facilitatorFetchHandler (and
+ * solidarity.afterSettle in an onSettleFailure hook) repeat the outcome the
+ * kit already gave, on the failed response. A settle recovered in onSettleFailure skips after-settle
+ * hooks: run `solidarity.afterSettle({ ...ctx, result })` on the recovered
+ * result there.
  */
 export function attachSolidarity(facilitator: x402Facilitator, opts: SolidarityFacilitatorOptions): SolidarityFacilitator {
   const ext = solidarityFacilitator(opts);
   facilitator.registerExtension(ext);
+  facilitator.onBeforeSettle((ctx) => ext.beforeSettle(ctx));
   facilitator.onAfterSettle((ctx) => ext.afterSettle(ctx));
   return ext;
 }

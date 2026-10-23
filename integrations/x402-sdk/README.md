@@ -43,11 +43,11 @@ The root `npm test` does not run the kit's tests (its glob is `test/*.test.ts` a
 
 | Test file | What it covers |
 | --- | --- |
-| `e2e.test.ts` | A buyer's x402Client (through `wrapFetchWithPayment`) pays an x402HTTPResourceServer route that settles through an x402Facilitator with `@x402/evm`'s ExactEvmScheme on the simulated chain. The share lands in the log, the buyer reads the outcome from `PAYMENT-RESPONSE`, the fund's simulated balance rises by exactly the share. Also: a failed purchase; `settlement_pending` with and without the seller's retry, after a 180-second receipt timeout, and a held share expiring; a share whose own receipt wait stays pending (settled again until it confirms, with no `findExactTransfer`) or never confirms; a stuck channel claim that must not hold up the next purchase; the scheme's verify deciding a share; three bad shares (byte-identical purchase core fields against a run with no extension); no policy, no declaration, a facilitator without the kit; the month close with a verified receipt; `batch-settlement` shares; the cap. |
+| `e2e.test.ts` | A buyer's x402Client (through `wrapFetchWithPayment`) pays an x402HTTPResourceServer route that settles through an x402Facilitator with `@x402/evm`'s ExactEvmScheme on the simulated chain. The share lands in the log, the buyer reads the outcome from `PAYMENT-RESPONSE`, the fund's simulated balance rises by exactly the share. Also: a failed purchase; `settlement_pending` with and without the seller's retry, after a 180-second receipt timeout, and a held share expiring; a share whose own receipt wait stays pending (settled again until it confirms, with no `findExactTransfer`) or never confirms; a stuck channel claim that must not hold up the next purchase, the late share it charges, and the resync on the purchase after; the scheme's verify deciding a share; three bad shares (byte-identical purchase core fields against a run with no extension); no policy, no declaration, a facilitator without the kit; the month close with a verified receipt; `batch-settlement` shares; the cap. |
 | `client.test.ts` | The buyer's extension inside x402Client: the share's window, the untouched declaration, the fallback, missing or throwing descriptors, signers and `onError`, the owner's rules, no retry signal, a seller that pre-fills a share, how many descriptors one 402 may fetch, the descriptor cache's refresh, bound and `https` rule. |
 | `resourceServer.test.ts` | No settle enrichment, echo validation with `dynamicInfoFields`, logs filled from `/supported`. |
-| `facilitator.test.ts` | `/supported`, `/verify` unchanged, three SDK canaries (the hook's result object, hooks on failed results, no hooks on a recovered settle), a throwing log and a throwing `onError`, a log that changes a core field, an unsubmittable or reverted share, `process()` without the hook. |
-| `wire.test.ts` | The SDK's own HTTPFacilitatorClient against `facilitatorFetchHandler` (through a swapped `globalThis.fetch`), a settle that throws, the node:http bridge's request builder, and the log's read endpoints. |
+| `facilitator.test.ts` | `/supported`, `/verify` unchanged, three SDK canaries (the hook's result object, hooks on failed results, no hooks on a recovered settle), one decision per settle (a later hook that throws, then the README's recovery; the seller's in-process retry with the same payload object), a throwing log and a throwing `onError`, a log that changes a core field, an unsubmittable or reverted share, `process()` without the hook. |
+| `wire.test.ts` | The SDK's own HTTPFacilitatorClient against `facilitatorFetchHandler` (through a swapped `globalThis.fetch`), a settle that throws, a later after-settle hook that throws, the node:http bridge (`fetchRequestFromNode` and `nodeRequestListener` with fake requests: bad targets, refused methods, a client that hangs up, a handler that throws), and the log's read endpoints. |
 | `kit.test.ts` | Exact pins, the installed versions, constants shared with the SDK, this README's plain statements, no dashes. |
 
 ## For a facilitator operator: an afternoon
@@ -78,7 +78,9 @@ const solidarity = attachSolidarity(facilitator, { log, onError: (e, where) => c
 
 `attachSolidarity` does two things: `facilitator.registerExtension(...)`, so `/supported` lists `"solidarity"`, and `facilitator.onAfterSettle(...)`, which hands each settled purchase to the log. It registers nothing on `/verify`: the purchase is verified exactly as without the extension, and a test checks that the VerifyResponse is identical with and without a share, with no chain writes.
 
-The log's decision on a share happens while the purchase's settle response waits, so it is bounded: if the log has not decided within `decisionTimeoutMs` (default 2000), the response goes out without a solidarity entry and the decision finishes in the background, where it shows at `/proofs/<id>`. That covers a slow RPC under the scheme's verify, and a `batch-settlement` share waiting for its channel while a claim on that channel is on chain. The buyer then sees no entry, as from a facilitator without the kit.
+The log's decision on a share happens while the purchase's settle response waits, so it is bounded: if the log has not decided within `decisionTimeoutMs` (default 2000), the response goes out without a solidarity entry and the decision finishes in the background, where it shows at `/proofs/<id>`. That covers a slow RPC under the scheme's verify, and a `batch-settlement` share waiting for its channel while a claim on that channel is on chain.
+
+A late decision is still a decision. The share can be accepted after the response has gone, and its value still moves (an `exact` transfer, or a charge on the channel). The buyer is not told: its `onOutcome` gets `undefined`, and the owner learns the result from `/proofs/<id>`. On a `batch-settlement` channel the buyer's client takes the missing outcome as "not charged", so its next share on that channel is one voucher behind the log: that share is skipped as `cumulative-mismatch`, the client resyncs from the log's snapshot, and the share after it goes through. A test shows the four purchases.
 
 `facilitatorLogChain(exact)` checks and settles an `exact` share as the spec says: through your existing scheme code, with `paymentPayload = {x402Version: 2, accepted: payment.accepted, payload: payment.payload}` and `paymentRequirements = payment.accepted`. The check is `exact.verify`, so a smart-wallet share (ERC-1271, ERC-6492), the payer's balance and the nonce are checked as for a purchase; a share the payer cannot cover is skipped with `bad-payment`. The transfer is `exact.settle`, after the purchase's response.
 
@@ -114,23 +116,20 @@ const descriptor = {
 
 ### 4. Serve it
 
-`facilitatorFetchHandler` is a `(Request) => Promise<Response>` handler. It serves `POST /verify`, `POST /settle`, `GET /supported`, and the log's five read endpoints under the log's path. It runs wherever Request and Response exist. A node:http bridge; `fetchRequestFromNode` is tested, the server around it is **untested** (the tests never open a socket):
+`facilitatorFetchHandler` is a `(Request) => Promise<Response>` handler. It serves `POST /verify`, `POST /settle`, `GET /supported`, and the log's five read endpoints under the log's path. It runs wherever Request and Response exist. On node:http, `nodeRequestListener` serves it:
 
 ```ts
 import { createServer } from "node:http";
-import { facilitatorFetchHandler, fetchRequestFromNode } from "./integrations/x402-sdk/src/index.ts";
+import { facilitatorFetchHandler, nodeRequestListener } from "./integrations/x402-sdk/src/index.ts";
 
 const handle = facilitatorFetchHandler({ facilitator, solidarity });
-createServer(async (req, res) => {
-  const request = await fetchRequestFromNode(req, "https://facilitator.example");   // your own origin, fixed
-  if (!request) return void res.writeHead(400).end();
-  const r = await handle(request);
-  res.writeHead(r.status, Object.fromEntries(r.headers));
-  res.end(Buffer.from(await r.arrayBuffer()));
-}).listen(4021);
+createServer(nodeRequestListener(handle, "https://facilitator.example", (e) => console.error("http", e)))   // your own origin, fixed
+  .listen(4021);
 ```
 
-`fetchRequestFromNode` builds the URL from the origin you give it, never from the `Host` header: a client-chosen `Host` such as `facilitator.example/settle?` would otherwise turn a request for one path into another, past a proxy that guards `/settle` by path. It also refuses (with `undefined`, for a 400) any request target that is not a plain path, or that URL parsing would change, such as one with `..` segments.
+`nodeRequestListener` is tested with fake requests and responses; the tests never open a socket, so `createServer` and `listen` around it are **untested**. Its promise never rejects, whatever the client sends or the handler does: in Node an unhandled rejection ends the process, and with it the log's in-memory state. A request it cannot use gets a 400, an error before the response starts gets a 500, and one after it closes the connection. If you write your own bridge, keep that property.
+
+It builds each Request with `fetchRequestFromNode`, which takes the URL from the origin you give it, never from the `Host` header: a client-chosen `Host` such as `facilitator.example/settle?` would otherwise turn a request for one path into another, past a proxy that guards `/settle` by path. It returns `undefined` (a 400) for any request target that is not a plain path, or that URL parsing would change, such as one with `..` segments; for a method that fetch's Request refuses (`TRACE`, `TRACK`, `CONNECT`); and for a body it cannot read, as when the client hangs up partway through a `POST`. It never rejects for a request.
 
 The handler has no authentication, rate limits or body size limits. Put it behind whatever you use for those now.
 
@@ -162,8 +161,8 @@ It claims what it is owed on any `batch-settlement` channels, builds the batch (
 
 - **Answer `/settle` with HTTP 200 for every SettleResponse, failed or not.** The SDK's HTTPFacilitatorClient throws on any other status, and the seller's SDK then rebuilds the failure without `extensions`, so the buyer loses the outcome. `facilitatorFetchHandler` does this; keep it if you write your own server.
 - **Put `extensionResponses` in the EXTENSION-RESPONSES header** (base64 JSON) and leave it out of the body. That is where the seller's SDK reads it, and it never reaches the buyer.
-- **Your own after-settle hooks must never throw.** In x402Facilitator a throwing after-settle hook turns a settled purchase into a failed settle. The kit's hook is total, and if a core field of the purchase's SettleResponse ever differs after it ran, it puts the field back and drops its entry.
-- **A settle you recover in `onSettleFailure` skips every after-settle hook,** the kit's included, so its share would never be processed. Run the kit's hook on the recovered result before you return it: `await solidarity.afterSettle({ ...ctx, result: recovered }); return { recovered: true, result: recovered };`. A settle that throws with nothing to recover it is answered by `facilitatorFetchHandler` as a failed SettleResponse (HTTP 200), and its share gets `purchase-not-final`.
+- **Your own after-settle hooks must never throw.** In x402Facilitator a throwing after-settle hook turns a settled purchase into a failed settle, even though its transfer went through. The kit's hook is total, and if a core field of the purchase's SettleResponse ever differs after it ran, it puts the field back and drops its entry. If a hook registered after the kit's throws anyway, the kit has already decided on the share, and the share may be accepted and its transfer under way: `facilitatorFetchHandler` and `solidarity.afterSettle` repeat that same outcome on the failed response, rather than deciding again.
+- **A settle you recover in `onSettleFailure` skips every after-settle hook,** the kit's included, so its share would never be processed. Run the kit's hook on the recovered result before you return it: `await solidarity.afterSettle({ ...ctx, result: recovered }); return { recovered: true, result: recovered };`. It decides once per `settle()` call (it keys on the `paymentPayload` object that x402Facilitator hands to every hook of one call): if its after-settle hook already ran on this settle, because a later hook threw, it puts the outcome it gave then on the recovered result. `attachSolidarity` also registers a before-settle hook so that a new `settle()` call with the same payload object, as the seller's retry of a `settlement_pending` purchase makes in process, gets a new decision. A settle that throws with nothing to recover it is answered by `facilitatorFetchHandler` as a failed SettleResponse (HTTP 200); if the scheme (or a before-settle hook) threw, its share gets `purchase-not-final`.
 - **Wait for `followUp` before you stop.** The response is not delayed for the share: an accepted `exact` share is submitted afterwards. Call `await solidarity.drain()` on shutdown, or pass `onFollowUp` to hand each one to a `waitUntil`. A share whose receipt is slow keeps its `followUp` open while it is settled again, up to `pendingGraceSeconds` after its `validBefore`.
 - **Nothing persists.** `SolidarityLog` keeps its lines, held shares and channel state in memory. A restart loses queued shares and any statement not yet published. A real log needs storage behind it; the reference code does not have any.
 - **`settlement_pending`.** When a purchase settle returns `settlement_pending`, its `exact` share is held. The seller's SDK settles once more; if that confirms, the kit resolves the held share (provided its window is still open: see `maxTimeoutSeconds` in step 3). If the purchase is still pending after that, the share stays held and is reported `pending`; your own receipt watcher calls `solidarity.resolvePending(transaction, confirmed)` when it knows, and the result shows at `/proofs/<id>`.
@@ -176,7 +175,7 @@ x402Facilitator has no hook that returns an enriched SettleResponse: after-settl
 - `settle()` returns the very object it passed to the hooks as `ctx.result`. So the kit's hook writes `ctx.result.extensions.solidarity` (for the buyer) and `ctx.result.extensionResponses.solidarity` (for the seller).
 - After-settle hooks run on every result the scheme returns, failed ones included (a failed transfer, `settlement_pending`), although `onAfterSettle` is documented as running "after successful facilitator payment settlement". Holding a pending purchase's share, and telling the buyer `purchase-not-final`, both depend on it.
 
-Neither is a documented contract, which is why the versions are pinned and `facilitator.test.ts` has a canary for each (and one for the recovered-settle gap above). If a canary fails after an upgrade, that is where to look.
+Neither is a documented contract, which is why the versions are pinned and `facilitator.test.ts` has a canary for each (and one for the recovered-settle gap above, and one that every hook of a settle sees the same `paymentPayload` object). If a canary fails after an upgrade, that is where to look.
 
 If you would rather not rely on them, skip `attachSolidarity` and wrap your own `/settle`:
 

@@ -26,8 +26,10 @@
  * The SDK ships no facilitator server, so this is the kit's own. It runs in
  * any runtime with Request and Response (Node 24, Workers, Deno, Bun). It has
  * no authentication, rate limits or body size limits: put it behind whatever
- * the operator already uses for those. On node:http, `fetchRequestFromNode`
- * builds the Request from a fixed origin, never from the Host header.
+ * the operator already uses for those. On node:http, `nodeRequestListener`
+ * serves it: `fetchRequestFromNode` builds the Request from a fixed origin,
+ * never from the Host header, and no request can make the listener reject
+ * (an unhandled rejection ends a Node process).
  */
 
 import type { x402Facilitator } from "@x402/core/facilitator";
@@ -86,7 +88,10 @@ export function facilitatorFetchHandler(opts: FacilitatorHandlerOptions): (req: 
         // Still a SettleResponse with HTTP 200, so the seller's SDK handles it as a failed settle.
         const message = (e as Error)?.message ?? "settle failed";
         result = { success: false, errorReason: "unexpected_settle_error", errorMessage: message, transaction: "", network: body.paymentRequirements.network } as SettleResponse;
-        // No after-settle hook ran: the share gets its purchase-not-final here (afterSettle is total).
+        // afterSettle is total and decides once per settle. If the scheme (or a before-settle
+        // hook) threw, no after-settle hook ran and the share gets purchase-not-final here. If the
+        // kit's own hook already decided and a later after-settle hook threw, it repeats that
+        // outcome: the share may be accepted and its transfer under way.
         await opts.solidarity?.afterSettle?.({ paymentPayload: body.paymentPayload, requirements: body.paymentRequirements, result });
       }
       const { extensionResponses, ...rest } = result as SettleResponse & { extensionResponses?: Record<string, unknown> };
@@ -120,32 +125,93 @@ export interface NodeRequestLike extends AsyncIterable<Uint8Array | string> {
  * as "https://facilitator.example". The Host header is never used to build the
  * URL: a client-chosen Host such as "facilitator.example/settle?" would
  * otherwise route a request for one path to another, past a proxy that guards
- * /settle or /verify by path. Returns undefined, for a 400, unless the request
- * target is a path ("/...") that URL parsing leaves exactly as sent (no dot
- * segments), so the handler routes on the path the proxy saw.
+ * /settle or /verify by path.
+ *
+ * Returns undefined, for a 400, for any request it cannot use, and never
+ * rejects for one: a request target that is not a path ("/...") that URL
+ * parsing leaves exactly as sent (no dot segments), so the handler routes on
+ * the path the proxy saw; a method fetch's Request refuses (TRACE, TRACK,
+ * CONNECT); a body that cannot be read, as when the client hangs up partway
+ * through it. It throws only for an `origin` that is not a URL, the operator's
+ * own configuration.
  */
 export async function fetchRequestFromNode(req: NodeRequestLike, origin: string): Promise<Request | undefined> {
-  const target = req.url ?? "";
-  if (!target.startsWith("/")) return undefined;
   const base = new URL(origin).origin;
-  let url: URL;
   try {
-    url = new URL(base + target);
+    const target = req.url ?? "";
+    if (!target.startsWith("/")) return undefined;
+    const url = new URL(base + target);
+    if (url.origin !== base || url.pathname !== target.split(/[?#]/, 1)[0]) return undefined;
+    const method = (req.method ?? "GET").toUpperCase();
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (typeof v === "string") headers.append(k, v);
+      else if (Array.isArray(v)) for (const x of v) headers.append(k, x);
+    }
+    // Refused before the body is read: new Request would throw for these.
+    if (method === "TRACE" || method === "TRACK" || method === "CONNECT") return undefined;
+    let body: Uint8Array | undefined;
+    if (method !== "GET" && method !== "HEAD") {
+      const chunks: Uint8Array[] = [];
+      for await (const c of req) chunks.push(typeof c === "string" ? Buffer.from(c) : c);
+      body = Buffer.concat(chunks);
+    }
+    return new Request(url, { method, headers, body });
   } catch {
     return undefined;
   }
-  if (url.origin !== base || url.pathname !== target.split(/[?#]/, 1)[0]) return undefined;
-  const method = (req.method ?? "GET").toUpperCase();
-  const headers = new Headers();
-  for (const [k, v] of Object.entries(req.headers)) {
-    if (typeof v === "string") headers.append(k, v);
-    else if (Array.isArray(v)) for (const x of v) headers.append(k, x);
-  }
-  let body: Uint8Array | undefined;
-  if (method !== "GET" && method !== "HEAD") {
-    const chunks: Uint8Array[] = [];
-    for await (const c of req) chunks.push(typeof c === "string" ? Buffer.from(c) : c);
-    body = Buffer.concat(chunks);
-  }
-  return new Request(url, { method, headers, body });
+}
+
+/** The parts of a node:http ServerResponse that `nodeRequestListener` writes. */
+export interface NodeResponseLike {
+  readonly headersSent: boolean;
+  writeHead(status: number, headers?: Record<string, string>): unknown;
+  end(body?: Uint8Array): unknown;
+  destroy(error?: Error): unknown;
+}
+
+/**
+ * A node:http request listener for a fetch-style handler:
+ *
+ *   createServer(nodeRequestListener(handle, "https://facilitator.example")).listen(4021);
+ *
+ * The Request comes from `fetchRequestFromNode` (the fixed origin; a 400 for a
+ * request it cannot use). The returned promise never rejects, whatever the
+ * request or the handler does: an error before the response starts is a 500,
+ * and one after it destroys the connection. `onError` sees each such error.
+ */
+export function nodeRequestListener(
+  handle: (req: Request) => Promise<Response>,
+  origin: string,
+  onError?: (error: unknown) => void,
+): (req: NodeRequestLike, res: NodeResponseLike) => Promise<void> {
+  new URL(origin); // a bad origin fails here, at startup, not on the first request
+  return async (req, res) => {
+    try {
+      const request = await fetchRequestFromNode(req, origin);
+      if (!request) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(Buffer.from(JSON.stringify({ error: "bad request" })));
+        return;
+      }
+      const r = await handle(request);
+      const body = Buffer.from(await r.arrayBuffer());
+      res.writeHead(r.status, Object.fromEntries(r.headers));
+      res.end(body);
+    } catch (e) {
+      try {
+        onError?.(e);
+      } catch {
+        // a reporting callback must not take the process down either
+      }
+      try {
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(Buffer.from(JSON.stringify({ error: "internal error" })));
+        } else res.destroy();
+      } catch {
+        // the connection is already gone
+      }
+    }
+  };
 }

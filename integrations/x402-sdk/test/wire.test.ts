@@ -11,7 +11,8 @@ import { afterEach, beforeEach, test } from "node:test";
 import { HTTPFacilitatorClient } from "@x402/core/http";
 import { resetAssetContractCache } from "@x402/evm";
 import { createDescriptorCache } from "../src/descriptors.ts";
-import { facilitatorFetchHandler, fetchRequestFromNode } from "../src/http.ts";
+import { facilitatorFetchHandler, fetchRequestFromNode, nodeRequestListener } from "../src/http.ts";
+import type { NodeRequestLike, NodeResponseLike } from "../src/http.ts";
 import { lastShareId, LOG, makeWorld, NET, resetTime, useSimulatedTime } from "./harness.ts";
 
 const FACILITATOR = "https://facilitator.example";
@@ -96,16 +97,133 @@ test("a settle that throws (nothing recovered it) is still HTTP 200, a failed Se
   assert.equal(w.fundBalance(), 0n);
 });
 
+test("a later after-settle hook throws after the kit accepted the share: the buyer is told accepted (its transfer goes ahead), not purchase-not-final", async () => {
+  const w = await overHttp();
+  // An operator's hook registered after attachSolidarity, with a bug the README warns about.
+  w.facilitator.onAfterSettle(async (ctx) => {
+    if ((ctx.paymentPayload.extensions as Record<string, unknown> | undefined)?.solidarity) throw new Error("operator hook bug");
+  });
+  const sellerBefore = w.balanceOf(w.sellerAddress);
+  const r = await w.buy();
+  assert.equal(r.status, 402, "the thrown hook fails the settle, as x402Facilitator does");
+  assert.equal(seen.find((s) => s.path === "/settle")?.status, 200);
+  assert.equal(r.paymentResponse?.success, false);
+  assert.equal(r.paymentResponse?.errorReason, "unexpected_settle_error");
+  assert.equal(r.outcome?.status, "accepted", JSON.stringify(r.outcome));
+  assert.equal(r.outcome?.amount, "500");
+  const id = lastShareId(w) as string;
+  assert.equal(r.outcome?.id, id);
+  await w.solidarity?.drain();
+  assert.equal(w.balanceOf(w.sellerAddress) - sellerBefore, 500_000n, "the purchase did settle on chain");
+  assert.equal(w.fundBalance(), 500n, "and so did the share, as the buyer was told");
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "queued");
+  assert.deepEqual(w.facilitatorErrors, []);
+});
+
+/** A fake node:http request: no socket. `fail` makes reading its body throw, as a client that hangs up does. */
+const node = (url: string | undefined, headers: Record<string, string | string[]> = {}, method = "GET", body?: string, fail?: Error): NodeRequestLike => ({
+  method,
+  url,
+  headers,
+  async *[Symbol.asyncIterator]() {
+    if (body !== undefined) yield Buffer.from(body);
+    if (fail) throw fail;
+  },
+});
+
+/** A fake node:http response that records what was written. `endThrows` makes end() throw once headers are sent. */
+function fakeResponse(endThrows = false) {
+  const out = { status: 0, headers: {} as Record<string, string>, body: "", destroyed: false, headersSent: false };
+  const res: NodeResponseLike = {
+    get headersSent() {
+      return out.headersSent;
+    },
+    writeHead(status, headers) {
+      out.status = status;
+      out.headers = headers ?? {};
+      out.headersSent = true;
+      return res;
+    },
+    end(body) {
+      if (endThrows) throw new Error("socket gone");
+      out.body = body ? Buffer.from(body).toString("utf8") : "";
+      return res;
+    },
+    destroy() {
+      out.destroyed = true;
+      return res;
+    },
+  };
+  return { res, out };
+}
+
+test("fetchRequestFromNode never rejects for a request it cannot use: a method fetch refuses, or a body the client stopped sending, is undefined (a 400)", async () => {
+  const origin = "https://facilitator.example";
+  for (const method of ["TRACE", "TRACK", "CONNECT", "trace"]) {
+    assert.equal(await fetchRequestFromNode(node("/supported", {}, method), origin), undefined, method);
+  }
+  const aborted = Object.assign(new Error("aborted"), { code: "ECONNRESET" });
+  assert.equal(await fetchRequestFromNode(node("/settle", { "content-type": "application/json" }, "POST", "abc", aborted), origin), undefined);
+  // Other methods still build a Request.
+  assert.equal((await fetchRequestFromNode(node("/supported", {}, "PROPFIND"), origin))?.method, "PROPFIND");
+  // Only the operator's own origin can throw, and nodeRequestListener checks it at startup.
+  await assert.rejects(fetchRequestFromNode(node("/supported"), "not a url"));
+  assert.throws(() => nodeRequestListener(async () => new Response(), "not a url"));
+});
+
+test("nodeRequestListener (the README's node:http bridge, without a socket): never rejects; 400 for an unusable request, 500 for a handler that throws, and a destroy once headers are out", async () => {
+  const origin = "https://facilitator.example";
+  const errors: unknown[] = [];
+  const echo = async (req: Request) => new Response(JSON.stringify({ path: new URL(req.url).pathname, body: await req.text() }), { status: 201, headers: { "x-seen": "1" } });
+  const listen = nodeRequestListener(echo, origin, (e) => errors.push(e));
+
+  let t = fakeResponse();
+  await listen(node("/settle", { host: "facilitator.example/verify?" }, "POST", "abc"), t.res);
+  assert.equal(t.out.status, 201);
+  assert.equal(t.out.headers["x-seen"], "1");
+  assert.deepEqual(JSON.parse(t.out.body), { path: "/settle", body: "abc" });
+
+  for (const req of [node("/supported", {}, "TRACE"), node("/settle", {}, "POST", "abc", new Error("aborted")), node("/a/../settle"), node("*")]) {
+    t = fakeResponse();
+    await listen(req, t.res);
+    assert.equal(t.out.status, 400, String(req.method) + " " + String(req.url));
+  }
+  assert.deepEqual(errors, [], "a refused request is not an error");
+
+  const boom = nodeRequestListener(async () => {
+    throw new Error("handler exploded");
+  }, origin, (e) => errors.push(e));
+  t = fakeResponse();
+  await boom(node("/supported"), t.res);
+  assert.equal(t.out.status, 500);
+  assert.equal((errors[0] as Error).message, "handler exploded");
+
+  // The response started and then failed: nothing more can be said, so the connection is dropped.
+  t = fakeResponse(true);
+  await listen(node("/supported"), t.res);
+  assert.equal(t.out.destroyed, true);
+
+  // A reporter that throws is not a way to reject either.
+  const loud = nodeRequestListener(async () => {
+    throw new Error("again");
+  }, origin, () => {
+    throw new Error("the reporter exploded too");
+  });
+  t = fakeResponse();
+  await loud(node("/supported"), t.res);
+  assert.equal(t.out.status, 500);
+
+  // The kit's own handler behind it.
+  const w = await overHttp();
+  const served = nodeRequestListener(facilitatorFetchHandler({ facilitator: w.facilitator, solidarity: w.solidarity }), origin);
+  t = fakeResponse();
+  await served(node("/supported"), t.res);
+  assert.equal(t.out.status, 200);
+  assert.ok((JSON.parse(t.out.body) as { extensions: string[] }).extensions.includes("solidarity"));
+});
+
 test("fetchRequestFromNode (the README's node:http bridge): the Host header never routes, and only a plain path is accepted", async () => {
   const origin = "https://facilitator.example";
-  const node = (url: string | undefined, headers: Record<string, string | string[]> = {}, method = "GET", body?: string) => ({
-    method,
-    url,
-    headers,
-    async *[Symbol.asyncIterator]() {
-      if (body !== undefined) yield Buffer.from(body);
-    },
-  });
   // A Host chosen to turn a proofs request into /settle, as `https://${host}${url}` would.
   const hostile = await fetchRequestFromNode(node("/solidarity/proofs/x", { host: "facilitator.example/settle?" }), origin);
   assert.equal(new URL(hostile?.url as string).pathname, "/solidarity/proofs/x");

@@ -216,7 +216,7 @@ test("a share receipt that never comes: queued while it is asked again, until va
   }
 });
 
-test("a channel claim stuck on chain does not hold up the next purchase: its response goes out without an entry, and the decision lands later", async () => {
+test("a channel claim stuck on chain does not hold up the next purchase: its response goes out without an entry, the decision lands later and charges the share, and the channel resyncs on the purchase after", async () => {
   let channel: ClientChannel | undefined;
   const w = await makeWorld({ price: "$0.05", clientOptions: { channelFor: () => channel }, facilitatorOptions: { decisionTimeoutMs: 500 } });
   const config = {
@@ -256,7 +256,22 @@ test("a channel claim stuck on chain does not hold up the next purchase: its res
   clearTimeout(safety);
   await w.solidarity?.drain();
   assert.equal(JSON.parse(w.log.handle(`/proofs/${id2}`).body).status, "queued", "decided in the background");
-  assert.equal(w.chain.channelState(cid)?.totalClaimed, 100n, "both shares claimed");
+  assert.equal(w.chain.channelState(cid)?.totalClaimed, 100n, "both shares claimed: the late one was charged though the buyer saw no entry");
+  assert.equal(w.outcomes[1], undefined, "the buyer's onOutcome got undefined for it");
+  assert.equal(channel?.chargedCumulativeAmount, "50", "the client took the missing outcome as not charged");
+
+  // So the buyer's next share on the channel is one voucher behind: skipped once, and the client resyncs from the log's snapshot.
+  const third = await w.buy();
+  assert.equal(third.status, 200, third.body);
+  assert.equal(third.outcome?.status, "skipped");
+  assert.equal(third.outcome?.reason, "cumulative-mismatch");
+  assert.equal(channel?.chargedCumulativeAmount, "100", "resynced to what the log charged");
+  await w.solidarity?.drain();
+  const fourth = await w.buy();
+  assert.equal(fourth.outcome?.status, "accepted", JSON.stringify(fourth.outcome));
+  await w.solidarity?.drain();
+  assert.equal(channel?.chargedCumulativeAmount, "150");
+  assert.equal(w.chain.channelState(cid)?.totalClaimed, 150n, "the skipped share cost nothing");
 });
 
 test("the log checks an exact share with the operator's scheme code: a buyer who cannot cover the share gets bad-payment, not accepted then uncollected", async () => {
@@ -448,11 +463,11 @@ test("batch-settlement shares: two small purchases accepted, the channel advance
   const first = await w.buy();
   assert.equal(first.outcome?.status, "accepted", JSON.stringify(first.outcome));
   assert.equal(first.outcome?.amount, "50");
-  assert.equal(channel.chargedCumulativeAmount, "50", "advanced by onPaymentResponse");
+  assert.equal(channel?.chargedCumulativeAmount, "50", "advanced by onPaymentResponse");
   assert.equal(channel.busy, false);
   const second = await w.buy();
   assert.equal(second.outcome?.status, "accepted", JSON.stringify(second.outcome));
-  assert.equal(channel.chargedCumulativeAmount, "100");
+  assert.equal(channel?.chargedCumulativeAmount, "100");
   assert.equal(second.outcome?.channel?.chargedCumulativeAmount, "100");
   await w.solidarity?.drain();
   assert.equal(w.chain.channelState(cid)?.totalClaimed, 0n, "nothing claimed before the month ends");

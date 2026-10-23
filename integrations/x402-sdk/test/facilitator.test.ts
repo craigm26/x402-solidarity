@@ -109,11 +109,73 @@ test("a settle recovered in onSettleFailure runs no after-settle hook (canary); 
   const { payload, requirements, id } = await signedPurchase(w);
   const r = await w.facilitator.settle(payload, requirements);
   assert.equal(r.success, true);
-  assert.deepEqual(hooksSaw, [], "if a future @x402/core runs after-settle hooks on recovered results, drop the afterSettle call from the recovery hook (it would answer duplicate)");
+  assert.deepEqual(hooksSaw, [], "if a future @x402/core runs after-settle hooks on recovered results, the afterSettle call in the recovery hook becomes redundant (it repeats the outcome)");
   assert.equal(readOutcome(r as { extensions?: Record<string, unknown> })?.status, "accepted");
   await w.solidarity?.drain();
   assert.equal(w.fundBalance(), 500n);
   assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "queued");
+});
+
+test("a later after-settle hook throws after the kit accepted the share, and the operator recovers as the README says: the buyer is told accepted, not duplicate (canary: every hook of one settle sees the same payload object)", async () => {
+  const w = await makeWorld();
+  let schemeResult: SettleResponse | undefined;
+  const hooksSawPayload: unknown[] = [];
+  w.facilitator.onBeforeSettle(async (ctx) => void hooksSawPayload.push(ctx.paymentPayload));
+  // An operator's hook registered after attachSolidarity, with a bug.
+  w.facilitator.onAfterSettle(async (ctx) => {
+    hooksSawPayload.push(ctx.paymentPayload);
+    if ((ctx.paymentPayload.extensions as Record<string, unknown> | undefined)?.solidarity) {
+      schemeResult = { ...ctx.result, extensions: undefined, extensionResponses: undefined };
+      throw new Error("operator hook bug");
+    }
+  });
+  let failureSawPayload: unknown;
+  w.facilitator.onSettleFailure(async (ctx) => {
+    if (!schemeResult?.success) return undefined;
+    failureSawPayload = ctx.paymentPayload;
+    const recovered = { ...schemeResult };
+    await w.solidarity?.afterSettle({ ...ctx, result: recovered }); // as the README says
+    return { recovered: true, result: recovered };
+  });
+  const { payload, requirements, id } = await signedPurchase(w);
+  const r = await w.facilitator.settle(payload, requirements);
+  hooksSawPayload.push(failureSawPayload);
+  assert.equal(hooksSawPayload.length, 3);
+  for (const p of hooksSawPayload) assert.equal(p, payload, "if a future @x402/core hands its hooks copies, the kit can no longer tell one settle from the next");
+  assert.equal(r.success, true);
+  const o = readOutcome(r as { extensions?: Record<string, unknown> });
+  assert.equal(o?.status, "accepted", JSON.stringify(o));
+  assert.equal(o?.id, id);
+  assert.deepEqual(r.extensionResponses, { solidarity: { status: "accepted" } });
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), 500n);
+  assert.equal(w.signer.writes.length, 2, "one purchase, one share: nothing decided or sent twice");
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "queued");
+  assert.deepEqual(w.facilitatorErrors, []);
+});
+
+test("a new settle() call with the same payload object gets a new decision: the seller's retry of a settlement_pending purchase, with x402Facilitator in process", async () => {
+  const payloads: unknown[] = [];
+  const w = await makeWorld({
+    // No JSON round trip: the seller's SDK retries with the identical payload object.
+    facilitatorClient: ({ facilitator }) => ({
+      verify: (p, q) => facilitator.verify(p, q),
+      settle: (p, q) => {
+        payloads.push(p);
+        return facilitator.settle(p, q);
+      },
+      getSupported: async () => facilitator.getSupported(),
+    }),
+  });
+  w.signer.failNextReceipt(1);
+  const r = await w.buy();
+  assert.equal(payloads.length, 2, "the seller's SDK settled twice");
+  assert.equal(payloads[0], payloads[1], "with the same object both times");
+  assert.equal(r.status, 200, r.body);
+  assert.equal(r.outcome?.status, "accepted", JSON.stringify(r.outcome));
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), 500n);
+  assert.equal(w.solidarity?.held.size, 0);
 });
 
 test("if the log throws, the purchase still settles, with no solidarity entry, and nothing reaches onSettleFailure", async () => {
