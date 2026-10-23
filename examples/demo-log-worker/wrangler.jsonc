@@ -28,5 +28,7 @@
     "END_DATE": "2027-03-31",
     "PAUSED": "0"
   },
+  // Workers Paid only: a deploy on Workers Free fails here, which is the point (README, "Deploy").
+  "limits": { "cpu_ms": 30000 },
   "observability": { "enabled": true }
 }
