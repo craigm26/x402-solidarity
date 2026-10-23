@@ -7,7 +7,7 @@ Read this first:
 - **A proposal.** The `solidarity` extension is not part of x402 or any other protocol. This kit is not affiliated with or endorsed by x402, Coinbase, the x402 Foundation, the UN or any fund, and it has not been reviewed by the SDK's maintainers.
 - **No fund exists.** Every fund address here is a placeholder (`0x...f00d`, `0x...beef`). Nobody controls them.
 - **Simulated.** Every test runs the real SDK classes in one process against a simulated chain (`../../src/sim/chain.ts`), with throwaway keys, no sockets and no network. No money moves.
-- **Testnet only** for anything beyond the tests: the manual appendix at the end uses Base Sepolia and test USDC, and nothing here has been run against a live chain.
+- **Testnet only** for anything beyond the tests: the manual appendix at the end uses Base Sepolia and test USDC. Nothing in this kit has been run against a live chain; the repository's own Base Sepolia script, which the appendix uses, has run once (see the appendix).
 - **Pinned.** The facilitator side relies on how `@x402/core` 2.28.0 runs its after-settle hooks, in ways its typings do not promise (see "How the outcome reaches the buyer"). The versions are pinned exactly, and canary tests fail if that behaviour changes.
 - **Written with AI assistance** (Claude Code).
 
@@ -269,9 +269,9 @@ A real deployment would still need:
 
 ## Appendix: trying it on Base Sepolia with test USDC (manual, testnet only)
 
-Nothing in the tests, and no agent, runs these steps. They use the repository's existing `examples/live-base-sepolia/` script, not this kit's facilitator. Test USDC has no value. Any test USDC sent to the placeholder fund address is gone, because nobody controls it.
+Nothing in the tests runs these steps. They use the repository's existing `examples/live-base-sepolia/` script, not this kit's facilitator. Test USDC has no value. Any test USDC sent to the placeholder fund address is gone, because nobody controls it.
 
-**Not yet run:** no transaction has been sent with this script. Steps 1 to 5 send nothing. Step 6 would be the first broadcast, and what it says is what the script is written to do, not something anyone has seen it do.
+**Run once:** on 2026-10-22 these steps were followed with a throwaway key, and step 6 settled a 1 USDC [purchase](https://sepolia.basescan.org/tx/0x28b37a956391981ab4e11c313b9454d24bf7469364a6f9de071a544fb4bbab5c) and then its 0.001 USDC [share](https://sepolia.basescan.org/tx/0xd1e4a7fb3152953a4ddcec9daeb49b09edff94074e3eb69c6c976bda37002a70) through the public x402.org facilitator. Steps 1 to 5 send nothing.
 
 You need Node 24 and a terminal open in the repository root (the folder with `README.md`, `package.json` and `examples/`). Every command below runs there.
 
@@ -303,7 +303,7 @@ You need Node 24 and a terminal open in the repository root (the folder with `RE
 
    Never send this address anything of real value, and delete `~/testnet.key` when you are done.
 
-4. Get test USDC for that address from Circle's public testnet faucet (faucet.circle.com): pick Base Sepolia, paste the address, and request USDC. Check the faucet's current limits and terms there. You need at least 1.001 test USDC. The script uses the USDC contract at `0x036CbD53842c5426634e7929541eC2318f3dCF7e` on Base Sepolia; check that this is the token the faucet sends.
+4. Get test USDC for that address from Circle's public testnet faucet (faucet.circle.com): pick Base Sepolia, paste the address, and request USDC. Check the faucet's current limits and terms there; on 2026-10-22 it sent 20 test USDC per request. You need at least 1.001 test USDC. The script uses the USDC contract at `0x036CbD53842c5426634e7929541eC2318f3dCF7e` on Base Sepolia, which is the token the faucet sent on 2026-10-22.
 
 5. Sign both payments and stop, still sending nothing:
 
@@ -313,13 +313,13 @@ You need Node 24 and a terminal open in the repository root (the folder with `RE
 
    It should print the key's address as `Payer`, then `Signed a 1 USDC purchase and an exact share of 1000 atomic units`, then `DRY_RUN=1: both signed; nothing checked against the chain or sent.`
 
-6. Only if you choose to broadcast (not yet run, as above): settle both through a facilitator that lists `exact` on `eip155:84532`. The facilitator pays the gas, so the key needs no ETH:
+6. Only if you choose to broadcast: settle both through a facilitator that lists `exact` on `eip155:84532`. The facilitator pays the gas, so the key needs no ETH:
 
    ```
    RPC_URL=https://sepolia.base.org FACILITATOR_URL=https://x402.org/facilitator node examples/live-base-sepolia/index.ts
    ```
 
-   As written, it sends 1 test USDC from the key to itself (the purchase, which comes back) and 0.001 test USDC to the placeholder address (the share, which is lost). It prints a transaction link for each.
+   It sends 1 test USDC from the key to itself (the purchase, which comes back) and 0.001 test USDC to the placeholder address (the share, which is lost), and prints a transaction link for each.
 
 Running this kit's own facilitator against Base Sepolia is a further step, also untested. Its signer key needs Base Sepolia ETH for gas, and the signer would be built from a viem wallet client roughly as below. That construction has not been checked against a live chain; verify it on your first testnet run. `toFacilitatorEvmSigner` waits 180 seconds for a receipt by default, which is what the descriptor's 600-second `exact` window in step 3 of the operator guide is sized for; if you change one, change the other.
 
