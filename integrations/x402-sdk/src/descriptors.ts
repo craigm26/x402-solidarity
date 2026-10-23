@@ -10,6 +10,10 @@
  * descriptor is missing, and an agent can `prefetch(policy.logs)` at startup.
  * An entry past its time to live is still returned (the purchase is never
  * delayed) and a refresh is started for it.
+ *
+ * Fetched entries are bounded (`maxEntries`, least recently used first out):
+ * a seller can declare logs at any https URL. Entries put in with `preload`
+ * or `set` are the owner's and are never evicted.
  */
 
 import type { LogDescriptor } from "../../../src/solidarity/index.ts";
@@ -38,6 +42,8 @@ export interface DescriptorCacheOptions {
   preload?: LogDescriptor[];
   /** Unix seconds. Default: the clock. */
   now?: () => number;
+  /** Fetched descriptors kept at most (default 100); the least recently used goes first. */
+  maxEntries?: number;
 }
 
 /** The shape a fetched descriptor must have before it is used. */
@@ -50,8 +56,21 @@ export function isUsableDescriptor(d: unknown, log: string): d is LogDescriptor 
 export function createDescriptorCache(opts: DescriptorCacheOptions = {}): DescriptorCache {
   const ttl = opts.ttlSeconds ?? 3600;
   const now = opts.now ?? (() => Math.floor(Date.now() / 1000));
+  const maxEntries = Math.max(1, opts.maxEntries ?? 100);
+  // Map order is recency: a hit moves its entry to the end.
   const entries = new Map<string, { descriptor: LogDescriptor; expiresAt: number }>();
   const inFlight = new Map<string, Promise<void>>();
+  const pinned = (e: { expiresAt: number }) => e.expiresAt === Number.POSITIVE_INFINITY;
+  const evict = () => {
+    let fetched = 0;
+    for (const e of entries.values()) if (!pinned(e)) fetched += 1;
+    for (const [k, e] of entries) {
+      if (fetched <= maxEntries) break;
+      if (pinned(e)) continue;
+      entries.delete(k);
+      fetched -= 1;
+    }
+  };
 
   const set = (descriptor: LogDescriptor) => {
     entries.set(descriptor.log, { descriptor: structuredClone(descriptor), expiresAt: Number.POSITIVE_INFINITY });
@@ -68,7 +87,9 @@ export function createDescriptorCache(opts: DescriptorCacheOptions = {}): Descri
       if (!res.ok) throw new Error(`GET ${log} answered ${res.status}`);
       const body = (await res.json()) as unknown;
       if (!isUsableDescriptor(body, log)) throw new Error(`GET ${log} did not return a draft 2 descriptor for that log`);
+      entries.delete(log);
       entries.set(log, { descriptor: body, expiresAt: now() + ttl });
+      evict();
     })().finally(() => inFlight.delete(log));
     inFlight.set(log, p);
     return p;
@@ -78,6 +99,8 @@ export function createDescriptorCache(opts: DescriptorCacheOptions = {}): Descri
     get(log: string) {
       const e = entries.get(log);
       if (!e) return undefined;
+      entries.delete(log);
+      entries.set(log, e);
       // Stale while revalidating: an old descriptor is still used, and a refresh starts.
       if (now() >= e.expiresAt) refresh(log).catch(() => undefined);
       return e.descriptor;

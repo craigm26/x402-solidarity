@@ -22,6 +22,15 @@
  *   share now, and a background refresh for later purchases.
  * - `onPaymentResponse` always returns void, never `{recovered: true}`, which
  *   would make @x402/fetch sign a second purchase (and a second share).
+ * - `onPaymentResponse` reports outcomes only for shares this extension
+ *   attached. x402Client keeps a seller's declared fields over the client's
+ *   (mergeExtensions), so a seller that pre-fills `id` and `payment` gets its
+ *   own share into the payload even though this extension refused to add one;
+ *   the owner must never be told that share's outcome as if it were theirs.
+ * - The 402 hook fetches few descriptors: only logs for a (network, scheme)
+ *   the seller offers in that 402, at most `maxDescriptorFetchesPer402` per
+ *   402 and `maxDescriptorFetchesInFlight` at once. A hostile 402 can declare
+ *   any number of logs when the policy does not list `logs`.
  */
 
 import type { ClientExtension, PaymentResponseContext } from "@x402/core/client";
@@ -57,7 +66,14 @@ export interface SolidarityClientOptions {
   onOutcome?: (outcome: SolidarityOutcome | undefined, ctx: { id: string; paymentPayload: PaymentPayload; settleResponse?: SettleResponse }) => void;
   /** Called with errors the extension swallowed. */
   onError?: (error: unknown) => void;
+  /** Descriptor fetches one 402 may start (default 4). */
+  maxDescriptorFetchesPer402?: number;
+  /** Descriptor fetches this extension keeps in flight at once (default 8). */
+  maxDescriptorFetchesInFlight?: number;
 }
+
+/** Share ids this extension attached and has not yet seen a response for; the oldest are forgotten past this. */
+const MAX_PENDING_IDS = 1024;
 
 /** The purchase's signed window: EIP-3009 `authorization`, or Permit2's witness.validAfter and deadline. */
 export function purchaseWindowOf(payload: Record<string, unknown> | undefined): { validAfter: string; validBefore: string } | undefined {
@@ -83,10 +99,35 @@ export function solidarityClientExtension(opts: SolidarityClientOptions): Client
       // a reporting callback must not break the purchase either
     }
   };
-  const warm = (log: string) => {
-    if (opts.policy.logs && !opts.policy.logs.includes(log)) return; // never fetch a log the owner does not trust
-    if (opts.descriptors.get(log) || !opts.descriptors.refresh) return;
-    opts.descriptors.refresh(log).catch(report);
+  const maxInFlight = opts.maxDescriptorFetchesInFlight ?? 8;
+  const maxPer402 = opts.maxDescriptorFetchesPer402 ?? 4;
+  let warming = 0;
+  /** Start a background descriptor fetch; true when one started. */
+  const warm = (log: string): boolean => {
+    if (opts.policy.logs && !opts.policy.logs.includes(log)) return false; // never fetch a log the owner does not trust
+    if (opts.descriptors.get(log) || !opts.descriptors.refresh) return false;
+    if (warming >= maxInFlight) return false;
+    warming += 1;
+    let p: Promise<void>;
+    try {
+      p = opts.descriptors.refresh(log);
+    } catch (e) {
+      warming -= 1;
+      report(e);
+      return false;
+    }
+    Promise.resolve(p)
+      .catch(report)
+      .finally(() => {
+        warming -= 1;
+      });
+    return true;
+  };
+  // Share ids this extension attached, awaiting their response (insertion order = age).
+  const attachedIds = new Set<string>();
+  const remember = (id: string) => {
+    attachedIds.add(id);
+    if (attachedIds.size > MAX_PENDING_IDS) attachedIds.delete(attachedIds.values().next().value as string);
   };
   // Shares signed on a channel and not answered yet, by share id.
   const inFlight = new Map<string, { channel: ClientChannel; at: number }>();
@@ -153,6 +194,7 @@ export function solidarityClientExtension(opts: SolidarityClientOptions): Client
       );
       decide(decision, pp);
       if (!decision.attached) return pp;
+      remember(decision.info.id as string);
       if (decision.kind === "batch-settlement" && channel) inFlight.set(decision.info.id as string, { channel, at: Date.now() / 1000 });
 
       // A new extensions object with a cloned info: never write into the object the
@@ -170,6 +212,8 @@ export function solidarityClientExtension(opts: SolidarityClientOptions): Client
       const info = shareInfo(ctx.paymentPayload);
       if (!info || typeof info.id !== "string") return;
       const id = info.id;
+      // Only a share this extension attached: not one a seller pre-filled in its declaration.
+      if (!attachedIds.delete(id)) return;
       const raw = ctx.settleResponse ? readOutcome(ctx.settleResponse as { extensions?: Record<string, unknown> }) : undefined;
       // Unsigned and relayed by the seller: only an outcome for this share's id counts.
       const outcome = raw && raw.id === id ? raw : undefined;
@@ -193,11 +237,18 @@ export function solidarityClientExtension(opts: SolidarityClientOptions): Client
     transportHooks: {
       http: {
         // Runs before payment creation. Starts fetching descriptors for the declared logs and
-        // returns at once, so the next purchase on that log can carry a share.
-        onPaymentRequired: async (declaration: unknown) => {
+        // returns at once, so the next purchase on that log can carry a share. Only logs for a
+        // (network, scheme) this 402 offers, and only a few per 402.
+        onPaymentRequired: async (declaration: unknown, ctx?: { paymentRequired?: PaymentRequired }) => {
           try {
             if (!isSolidarityExtension(declaration)) return undefined;
-            for (const l of declaration.info.logs ?? []) if (typeof l?.log === "string") warm(l.log);
+            const accepts = ctx?.paymentRequired?.accepts;
+            const offered = (l: { network?: unknown; scheme?: unknown }) => !Array.isArray(accepts) || accepts.some((a) => a?.network === l.network && a?.scheme === l.scheme);
+            let started = 0;
+            for (const l of declaration.info.logs ?? []) {
+              if (started >= maxPer402) break;
+              if (typeof l?.log === "string" && offered(l) && warm(l.log)) started += 1;
+            }
           } catch (e) {
             report(e);
           }

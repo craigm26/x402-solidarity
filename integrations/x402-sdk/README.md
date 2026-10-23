@@ -1,6 +1,6 @@
 # x402 SDK integration kit
 
-This folder wires the draft 2 `solidarity` extension into the official x402 TypeScript SDK, version 2.28.0 (`@x402/core`, `@x402/evm`, and `@x402/fetch` for buyers). Each role adds it in about three lines, and the kit reuses the reference implementation in `../../src/solidarity/` unchanged.
+This folder wires the draft 2 `solidarity` extension into the official x402 TypeScript SDK, version 2.28.0 (`@x402/core`, `@x402/evm`, and `@x402/fetch` for buyers). Each role adds it in about three lines, and the kit reuses the reference implementation in `../../src/solidarity/`. The one thing the reference gained for the kit is an optional `LogChain.verifyExact`, so the log can check a share with the operator's own scheme code, as the spec says.
 
 Read this first:
 
@@ -8,7 +8,7 @@ Read this first:
 - **No fund exists.** Every fund address here is a placeholder (`0x...f00d`, `0x...beef`). Nobody controls them.
 - **Simulated.** Every test runs the real SDK classes in one process against a simulated chain (`../../src/sim/chain.ts`), with throwaway keys, no sockets and no network. No money moves.
 - **Testnet only** for anything beyond the tests: the manual appendix at the end uses Base Sepolia and test USDC, and nothing here has been run against a live chain.
-- **Pinned.** The facilitator side relies on how `@x402/core` 2.28.0 hands the settle result to its hooks (see "How the outcome reaches the buyer"). The versions are pinned exactly, and a test fails if that behaviour changes.
+- **Pinned.** The facilitator side relies on how `@x402/core` 2.28.0 runs its after-settle hooks, in ways its typings do not promise (see "How the outcome reaches the buyer"). The versions are pinned exactly, and canary tests fail if that behaviour changes.
 - **Written with AI assistance** (Claude Code).
 
 The spec is three documents at https://craigmerry.com/solidarity-levy/spec/: `solidarity.md` (the extension), `attestation.md` (the log) and `processor-mode.md` (informative). Where this kit and the spec disagree, the spec wins.
@@ -43,11 +43,11 @@ The root `npm test` does not run the kit's tests (its glob is `test/*.test.ts` a
 
 | Test file | What it covers |
 | --- | --- |
-| `e2e.test.ts` | A buyer's x402Client (through `wrapFetchWithPayment`) pays an x402HTTPResourceServer route that settles through an x402Facilitator with `@x402/evm`'s ExactEvmScheme on the simulated chain. The share lands in the log, the buyer reads the outcome from `PAYMENT-RESPONSE`, the fund's simulated balance rises by exactly the share. Also: a failed purchase, `settlement_pending` with and without the seller's retry, three bad shares (byte-identical purchase core fields against a run with no extension), no policy, no declaration, a facilitator without the kit, the month close with a verified receipt, `batch-settlement` shares, and the cap. |
-| `client.test.ts` | The buyer's extension inside x402Client: the share's window, the untouched declaration, the fallback, missing or throwing descriptors and signers, the owner's rules, no retry signal. |
+| `e2e.test.ts` | A buyer's x402Client (through `wrapFetchWithPayment`) pays an x402HTTPResourceServer route that settles through an x402Facilitator with `@x402/evm`'s ExactEvmScheme on the simulated chain. The share lands in the log, the buyer reads the outcome from `PAYMENT-RESPONSE`, the fund's simulated balance rises by exactly the share. Also: a failed purchase; `settlement_pending` with and without the seller's retry, after a 180-second receipt timeout, and a held share expiring; a share whose own receipt wait stays pending (settled again until it confirms, with no `findExactTransfer`) or never confirms; a stuck channel claim that must not hold up the next purchase; the scheme's verify deciding a share; three bad shares (byte-identical purchase core fields against a run with no extension); no policy, no declaration, a facilitator without the kit; the month close with a verified receipt; `batch-settlement` shares; the cap. |
+| `client.test.ts` | The buyer's extension inside x402Client: the share's window, the untouched declaration, the fallback, missing or throwing descriptors, signers and `onError`, the owner's rules, no retry signal, a seller that pre-fills a share, how many descriptors one 402 may fetch, the descriptor cache's refresh, bound and `https` rule. |
 | `resourceServer.test.ts` | No settle enrichment, echo validation with `dynamicInfoFields`, logs filled from `/supported`. |
-| `facilitator.test.ts` | `/supported`, `/verify` unchanged, the SDK canary, a throwing log, a log that changes a core field, an unsubmittable share, `process()` without the hook. |
-| `wire.test.ts` | The SDK's own HTTPFacilitatorClient against `facilitatorFetchHandler` (through a swapped `globalThis.fetch`), and the log's read endpoints. |
+| `facilitator.test.ts` | `/supported`, `/verify` unchanged, three SDK canaries (the hook's result object, hooks on failed results, no hooks on a recovered settle), a throwing log and a throwing `onError`, a log that changes a core field, an unsubmittable or reverted share, `process()` without the hook. |
+| `wire.test.ts` | The SDK's own HTTPFacilitatorClient against `facilitatorFetchHandler` (through a swapped `globalThis.fetch`), a settle that throws, the node:http bridge's request builder, and the log's read endpoints. |
 | `kit.test.ts` | Exact pins, the installed versions, constants shared with the SDK, this README's plain statements, no dashes. |
 
 ## For a facilitator operator: an afternoon
@@ -78,7 +78,13 @@ const solidarity = attachSolidarity(facilitator, { log, onError: (e, where) => c
 
 `attachSolidarity` does two things: `facilitator.registerExtension(...)`, so `/supported` lists `"solidarity"`, and `facilitator.onAfterSettle(...)`, which hands each settled purchase to the log. It registers nothing on `/verify`: the purchase is verified exactly as without the extension, and a test checks that the VerifyResponse is identical with and without a share, with no chain writes.
 
-`facilitatorLogChain(exact)` settles an accepted `exact` share as the spec says: through your existing scheme code, with `paymentPayload = {x402Version: 2, accepted: payment.accepted, payload: payment.payload}` and `paymentRequirements = payment.accepted`. If that settle comes back `settlement_pending`, it settles again (twice by default), and the scheme's pending store reconciles the same broadcast. The optional `batch-settlement` share kind needs channel reads and claims that a FacilitatorEvmSigner cannot make; pass them as `facilitatorLogChain(exact, { fallback })`, or leave `batch-settlement` out of your descriptor.
+The log's decision on a share happens while the purchase's settle response waits, so it is bounded: if the log has not decided within `decisionTimeoutMs` (default 2000), the response goes out without a solidarity entry and the decision finishes in the background, where it shows at `/proofs/<id>`. That covers a slow RPC under the scheme's verify, and a `batch-settlement` share waiting for its channel while a claim on that channel is on chain. The buyer then sees no entry, as from a facilitator without the kit.
+
+`facilitatorLogChain(exact)` checks and settles an `exact` share as the spec says: through your existing scheme code, with `paymentPayload = {x402Version: 2, accepted: payment.accepted, payload: payment.payload}` and `paymentRequirements = payment.accepted`. The check is `exact.verify`, so a smart-wallet share (ERC-1271, ERC-6492), the payer's balance and the nonce are checked as for a purchase; a share the payer cannot cover is skipped with `bad-payment`. The transfer is `exact.settle`, after the purchase's response.
+
+If the share's settle comes back `settlement_pending` (its transfer was broadcast and the receipt wait timed out), it is settled again after a wait that grows (5 seconds, doubling, at most 60), and the scheme's pending store re-waits on the same broadcast; nothing is sent twice. The share stays `queued` meanwhile, and `closePeriod` refuses to close its month while it is. Only after the share's `validBefore` has passed (after which an unexecuted authorization can never execute) and `pendingGraceSeconds` more (default 3600) with no receipt is the transfer reported as not made, and then the share is uncollected unless `findExactTransfer` finds it. Set `retryDelayMs` and `pendingGraceSeconds` in `facilitatorLogChain(exact, {...})`.
+
+The optional `batch-settlement` share kind needs channel reads and claims that a FacilitatorEvmSigner cannot make; pass them as `facilitatorLogChain(exact, { fallback })`, or leave `batch-settlement` out of your descriptor.
 
 ### 3. The descriptor and the log's key
 
@@ -94,7 +100,7 @@ const descriptor = {
   funds: ["eip155:84532:0x000000000000000000000000000000000000f00d"],   // placeholder: no fund exists
   accepts: [
     { network: "eip155:84532", asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e", scheme: "exact",
-      maxTimeoutSeconds: 60, minAmount: "10000", extra: { name: "USDC", version: "2" } },
+      maxTimeoutSeconds: 600, minAmount: "10000", extra: { name: "USDC", version: "2" } },
   ],
   keys: [{ kid: key.kid, from: "2026-10", until: null, jwk: publicJwk(key.publicKey) }],
   witnesses: ["did:web:witness.example"],
@@ -102,30 +108,29 @@ const descriptor = {
 ```
 
 - `funds` is your allow-list. You settle shares only to these.
+- `maxTimeoutSeconds` on the `exact` entry is how long a share stays valid after the purchase's own `validBefore` (the buyer signs `validBefore` = purchase `validBefore` + this). Size it to your settle path: at least twice your signer's receipt timeout plus a minute, because a `settlement_pending` purchase confirms only on the seller's retry, after up to two receipt waits, and the share must still be valid then. `toFacilitatorEvmSigner` waits 180 seconds by default, hence 600 here. With 60, a purchase that confirms on the retry finds its share expired: the buyer is told `bad-payment` and the fund gets nothing (a test shows both).
 - `minAmount` is your lever on gas. You pay the gas for every `exact` share transfer (totals are gross; processor-mode.md, "Fees"), so set it where one transfer is worth it.
 - The key's `kid` is a DID URL on the log's host. Publish the key in a `did:web` document there (or a DNS TXT record), as attestation.md, "Signatures and keys", says. The reference code keeps the key in memory; where it comes from is up to you.
 
 ### 4. Serve it
 
-`facilitatorFetchHandler` is a `(Request) => Promise<Response>` handler. It serves `POST /verify`, `POST /settle`, `GET /supported`, and the log's five read endpoints under the log's path. It runs wherever Request and Response exist. A node:http bridge, **untested** (the tests never open a socket):
+`facilitatorFetchHandler` is a `(Request) => Promise<Response>` handler. It serves `POST /verify`, `POST /settle`, `GET /supported`, and the log's five read endpoints under the log's path. It runs wherever Request and Response exist. A node:http bridge; `fetchRequestFromNode` is tested, the server around it is **untested** (the tests never open a socket):
 
 ```ts
 import { createServer } from "node:http";
-import { facilitatorFetchHandler } from "./integrations/x402-sdk/src/index.ts";
+import { facilitatorFetchHandler, fetchRequestFromNode } from "./integrations/x402-sdk/src/index.ts";
 
 const handle = facilitatorFetchHandler({ facilitator, solidarity });
 createServer(async (req, res) => {
-  const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
-  const r = await handle(new Request(`https://${req.headers.host}${req.url}`, {
-    method: req.method,
-    headers: Object.entries(req.headers).flatMap(([k, v]) => (typeof v === "string" ? [[k, v]] : [])),
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks),
-  }));
+  const request = await fetchRequestFromNode(req, "https://facilitator.example");   // your own origin, fixed
+  if (!request) return void res.writeHead(400).end();
+  const r = await handle(request);
   res.writeHead(r.status, Object.fromEntries(r.headers));
   res.end(Buffer.from(await r.arrayBuffer()));
 }).listen(4021);
 ```
+
+`fetchRequestFromNode` builds the URL from the origin you give it, never from the `Host` header: a client-chosen `Host` such as `facilitator.example/settle?` would otherwise turn a request for one path into another, past a proxy that guards `/settle` by path. It also refuses (with `undefined`, for a 400) any request target that is not a plain path, or that URL parsing would change, such as one with `..` segments.
 
 The handler has no authentication, rate limits or body size limits. Put it behind whatever you use for those now.
 
@@ -158,22 +163,31 @@ It claims what it is owed on any `batch-settlement` channels, builds the batch (
 - **Answer `/settle` with HTTP 200 for every SettleResponse, failed or not.** The SDK's HTTPFacilitatorClient throws on any other status, and the seller's SDK then rebuilds the failure without `extensions`, so the buyer loses the outcome. `facilitatorFetchHandler` does this; keep it if you write your own server.
 - **Put `extensionResponses` in the EXTENSION-RESPONSES header** (base64 JSON) and leave it out of the body. That is where the seller's SDK reads it, and it never reaches the buyer.
 - **Your own after-settle hooks must never throw.** In x402Facilitator a throwing after-settle hook turns a settled purchase into a failed settle. The kit's hook is total, and if a core field of the purchase's SettleResponse ever differs after it ran, it puts the field back and drops its entry.
-- **Wait for `followUp` before you stop.** The response is not delayed for the share: an accepted `exact` share is submitted afterwards. Call `await solidarity.drain()` on shutdown, or pass `onFollowUp` to hand each one to a `waitUntil`.
+- **A settle you recover in `onSettleFailure` skips every after-settle hook,** the kit's included, so its share would never be processed. Run the kit's hook on the recovered result before you return it: `await solidarity.afterSettle({ ...ctx, result: recovered }); return { recovered: true, result: recovered };`. A settle that throws with nothing to recover it is answered by `facilitatorFetchHandler` as a failed SettleResponse (HTTP 200), and its share gets `purchase-not-final`.
+- **Wait for `followUp` before you stop.** The response is not delayed for the share: an accepted `exact` share is submitted afterwards. Call `await solidarity.drain()` on shutdown, or pass `onFollowUp` to hand each one to a `waitUntil`. A share whose receipt is slow keeps its `followUp` open while it is settled again, up to `pendingGraceSeconds` after its `validBefore`.
 - **Nothing persists.** `SolidarityLog` keeps its lines, held shares and channel state in memory. A restart loses queued shares and any statement not yet published. A real log needs storage behind it; the reference code does not have any.
-- **`settlement_pending`.** When a purchase settle returns `settlement_pending`, its `exact` share is held. The seller's SDK settles once more; if that confirms, the kit resolves the held share. If the purchase is still pending after that, the share stays held and is reported `pending`; your own receipt watcher calls `solidarity.resolvePending(transaction, confirmed)` when it knows, and the result shows at `/proofs/<id>`.
+- **`settlement_pending`.** When a purchase settle returns `settlement_pending`, its `exact` share is held. The seller's SDK settles once more; if that confirms, the kit resolves the held share (provided its window is still open: see `maxTimeoutSeconds` in step 3). If the purchase is still pending after that, the share stays held and is reported `pending`; your own receipt watcher calls `solidarity.resolvePending(transaction, confirmed)` when it knows, and the result shows at `/proofs/<id>`.
+- **Held shares expire.** Once a held share's `validBefore` is too close for the log to accept it, the kit drops it as `purchase-not-final` and `/proofs/<id>` answers 404: it was never accepted, and its authorization can no longer move anything. This runs on every settle; if settles are rare, call `solidarity.expireHeld()` from a timer.
 
 ### How the outcome reaches the buyer
 
-x402Facilitator has no hook that returns an enriched SettleResponse: after-settle hooks return nothing, and `settle()` never builds `extensions` itself. It does return the very object it passed to the hooks as `ctx.result`. So the kit's hook writes `ctx.result.extensions.solidarity` (for the buyer) and `ctx.result.extensionResponses.solidarity` (for the seller). This is how 2.28.0 behaves, not a documented contract, which is why the versions are pinned and `facilitator.test.ts` has a canary for it.
+x402Facilitator has no hook that returns an enriched SettleResponse: after-settle hooks return nothing, and `settle()` never builds `extensions` itself. The kit relies on two things 2.28.0 does that its typings do not promise:
 
-If you would rather not rely on it, skip `attachSolidarity` and wrap your own `/settle`:
+- `settle()` returns the very object it passed to the hooks as `ctx.result`. So the kit's hook writes `ctx.result.extensions.solidarity` (for the buyer) and `ctx.result.extensionResponses.solidarity` (for the seller).
+- After-settle hooks run on every result the scheme returns, failed ones included (a failed transfer, `settlement_pending`), although `onAfterSettle` is documented as running "after successful facilitator payment settlement". Holding a pending purchase's share, and telling the buyer `purchase-not-final`, both depend on it.
+
+Neither is a documented contract, which is why the versions are pinned and `facilitator.test.ts` has a canary for each (and one for the recovered-settle gap above). If a canary fails after an upgrade, that is where to look.
+
+If you would rather not rely on them, skip `attachSolidarity` and wrap your own `/settle`:
 
 ```ts
 const solidarity = solidarityFacilitator({ log });
 facilitator.registerExtension(solidarity);            // so /supported lists it
 const r = await facilitator.settle(paymentPayload, paymentRequirements);
-return (await solidarity.process(paymentPayload, paymentRequirements, r)).response;   // a new object
+return (await solidarity.process(paymentPayload, paymentRequirements, r)).response;
 ```
+
+`process()` returns a new SettleResponse and leaves its inputs alone, with the outcome in `extensions` and the seller's `{status}` in `extensionResponses` (put it in the EXTENSION-RESPONSES header). It is not pure: it records the share in the log and starts the share's transfer, so call it once per settle; a second call for the same share answers `duplicate`.
 
 From there the outcome travels in `PAYMENT-RESPONSE` (the seller's SDK keeps `extensions` and strips `extensionResponses`), on a failed purchase's 402 as well, to the buyer's `onPaymentResponse` hook.
 
@@ -230,7 +244,8 @@ const pay = wrapFetchWithPayment(fetch, client);
 - A share is added only when the seller declared a log for the purchase's network and scheme, the owner trusts that log, its descriptor is cached and lists the fund, the purchase is in the cap's asset, and the cap has room. Otherwise the purchase goes ahead exactly as plain x402.
 - The cap counts a share when it is signed, even if the purchase later fails. The spec lets you release an `exact` share once its `validBefore` has passed and it was never executed (`counter.release`).
 - Shares are signed outside x402Client's spend controls, which filter only the purchase's accepts. The owner's cap is the only limit on shares.
-- The outcome you get is unsigned and passes through the seller. Proof is inclusion in a cosigned statement, which you fetch from `/proofs/<id>`. Pass `onOutcome` to see each outcome.
+- The outcome you get is unsigned and passes through the seller. Proof is inclusion in a cosigned statement, which you fetch from `/proofs/<id>`. Pass `onOutcome` to see each outcome. It is called only for shares this extension attached: a seller that pre-fills a share in its declaration gets no share added (x402Client then keeps the seller's fields in the payload anyway), and its outcome is never reported as yours.
+- A 402 starts few descriptor fetches: only for logs on a (network, scheme) that 402 offers, at most `maxDescriptorFetchesPer402` (default 4) per 402 and `maxDescriptorFetchesInFlight` (default 8) at once. The cache keeps at most `maxEntries` (default 100) fetched descriptors; ones you `preload` or `set` stay.
 
 ## What is simulated, and what a real deployment still needs
 
@@ -241,7 +256,7 @@ A real deployment would still need:
 - **A real fund** that has agreed to receive shares, on your allow-list, and that cosigns the statements naming it (attestation.md, "Witnesses and the fund"). None exists today.
 - **Keys:** the log's statement key in a secret store, published in a `did:web` document or DNS, and a facilitator signer with gas for every share transfer.
 - **Witnesses** that check and cosign each month's statement.
-- **Chain reads** the reference code does not make: balances and nonce state before accepting a share, smart-wallet signatures (ERC-1271, ERC-6492), and `findExactTransfer` (an RPC client reading `AuthorizationUsed` and `Transfer` events), without which a share someone else submitted first is reported uncollected.
+- **`findExactTransfer`**, an RPC client reading `AuthorizationUsed` and `Transfer` events, passed as `fallback`. Without it, a share someone else submitted first, or one whose receipt never came within `pendingGraceSeconds` after its `validBefore`, is reported uncollected. (Balances, nonce state and smart-wallet signatures are checked by your scheme's verify through `facilitatorLogChain`; the reference code alone checks EOA signatures offline.)
 - **Storage** for lines, held shares, channel state and published statements.
 - **Answers to the regulatory questions** in processor-mode.md, "Open questions" 3: passing other people's money to a third-party fund can be money transmission or remittance, and can need charitable-solicitation registration. Nothing here answers them.
 
@@ -250,43 +265,63 @@ A real deployment would still need:
 - Permit2, `upto` and `auth-capture` purchases are not exercised; the simulated signer models EIP-3009 `exact` only. The client code reads a Permit2 purchase window, but that path is untested.
 - `batch-settlement` purchases never carry a share (the spec forbids it), and the kit's `batch-settlement` shares need channel support from `fallback`.
 - The client gives up a channel share whose response never arrived after `staleChannelSeconds` (default 300) and relies on a `cumulative-mismatch` to resync. That path is untested.
-- The descriptor cache trusts any `https` URL a seller declares unless the policy lists `logs`. Set `logs`.
+- The descriptor cache trusts any `https` URL a seller declares unless the policy lists `logs`. Set `logs`. Without it, a hostile 402 can still make the agent fetch a few URLs of its choosing (see the limits under "For buyers").
 
 ## Appendix: trying it on Base Sepolia with test USDC (manual, testnet only)
 
 Nothing in the tests, and no agent, runs these steps. They use the repository's existing `examples/live-base-sepolia/` script, not this kit's facilitator. Test USDC has no value. Any test USDC sent to the placeholder fund address is gone, because nobody controls it.
 
-1. In the repository root, run `npm install`.
-2. Check everything without funds and without sending anything:
+**Not yet run:** no transaction has been sent with this script. Steps 1 to 5 send nothing. Step 6 would be the first broadcast, and what it says is what the script is written to do, not something anyone has seen it do.
+
+You need Node 24 and a terminal open in the repository root (the folder with `README.md`, `package.json` and `examples/`). Every command below runs there.
+
+1. Install the dependencies once:
+
+   ```
+   npm install
+   ```
+
+2. Check everything without a key, without funds and without sending anything:
 
    ```
    SIMULATE=1 RPC_URL=https://sepolia.base.org node examples/live-base-sepolia/index.ts
    ```
 
-   This signs a purchase and its share with a throwaway key and runs both transfers against the deployed USDC contract with `eth_call`. It needs no funds and sends nothing.
-3. Make a throwaway key for the testnet, in the repository root:
+   This signs a purchase and its share with a throwaway key and runs both transfers against the USDC contract deployed on Base Sepolia with `eth_call` (a read). It needs no funds and sends nothing. It should end with `SIMULATE=1: both would execute on Base Sepolia; nothing was sent.`
+
+3. Make a throwaway key for the testnet. This saves it to `~/testnet.key` (outside the repository, readable by you only) and prints only its address, so the key never appears on screen or in your shell history:
 
    ```
-   node -e 'import("viem/accounts").then(({ generatePrivateKey, privateKeyToAccount }) => { const k = generatePrivateKey(); console.log("PRIVATE_KEY=" + k); console.log("address: " + privateKeyToAccount(k).address); })'
+   node -e 'const fs = require("node:fs"); import("viem/accounts").then(({ generatePrivateKey, privateKeyToAccount }) => { const k = generatePrivateKey(); fs.writeFileSync(require("node:os").homedir() + "/testnet.key", k + "\n", { mode: 0o600, flag: "wx" }); console.log("key saved to ~/testnet.key; address " + privateKeyToAccount(k).address); })'
    ```
 
-   Keep the key out of the repository and never send it anything of real value.
-4. Request test USDC for that address on Base Sepolia from Circle's public testnet faucet (faucet.circle.com). Check its current limits and terms there. You need at least 1.001 test USDC.
-5. Run once with `DRY_RUN=1`, which signs both payments and stops:
+   It refuses to overwrite an existing `~/testnet.key`. Write down the address. Then load the key into this terminal for the steps below (it lasts until you close the terminal):
 
    ```
-   PRIVATE_KEY=0x... RPC_URL=https://sepolia.base.org DRY_RUN=1 node examples/live-base-sepolia/index.ts
+   export PRIVATE_KEY=$(cat ~/testnet.key)
    ```
 
-6. Only if you choose to broadcast: settle both through a facilitator that lists `exact` on `eip155:84532`, which pays the gas, so the key needs no ETH:
+   Never send this address anything of real value, and delete `~/testnet.key` when you are done.
+
+4. Get test USDC for that address from Circle's public testnet faucet (faucet.circle.com): pick Base Sepolia, paste the address, and request USDC. Check the faucet's current limits and terms there. You need at least 1.001 test USDC. The script uses the USDC contract at `0x036CbD53842c5426634e7929541eC2318f3dCF7e` on Base Sepolia; check that this is the token the faucet sends.
+
+5. Sign both payments and stop, still sending nothing:
 
    ```
-   PRIVATE_KEY=0x... RPC_URL=https://sepolia.base.org FACILITATOR_URL=https://x402.org/facilitator node examples/live-base-sepolia/index.ts
+   RPC_URL=https://sepolia.base.org DRY_RUN=1 node examples/live-base-sepolia/index.ts
    ```
 
-   This sends 1 test USDC from the key to itself (the purchase) and 0.001 test USDC to the placeholder address (the share). The 0.001 is lost.
+   It should print the key's address as `Payer`, then `Signed a 1 USDC purchase and an exact share of 1000 atomic units`, then `DRY_RUN=1: both signed; nothing checked against the chain or sent.`
 
-Running this kit's own facilitator against Base Sepolia is a further step, also untested. Its signer key needs Base Sepolia ETH for gas, and the signer would be built from a viem wallet client roughly as below. That construction has not been checked against a live chain; verify it on your first testnet run.
+6. Only if you choose to broadcast (not yet run, as above): settle both through a facilitator that lists `exact` on `eip155:84532`. The facilitator pays the gas, so the key needs no ETH:
+
+   ```
+   RPC_URL=https://sepolia.base.org FACILITATOR_URL=https://x402.org/facilitator node examples/live-base-sepolia/index.ts
+   ```
+
+   As written, it sends 1 test USDC from the key to itself (the purchase, which comes back) and 0.001 test USDC to the placeholder address (the share, which is lost). It prints a transaction link for each.
+
+Running this kit's own facilitator against Base Sepolia is a further step, also untested. Its signer key needs Base Sepolia ETH for gas, and the signer would be built from a viem wallet client roughly as below. That construction has not been checked against a live chain; verify it on your first testnet run. `toFacilitatorEvmSigner` waits 180 seconds for a receipt by default, which is what the descriptor's 600-second `exact` window in step 3 of the operator guide is sized for; if you change one, change the other.
 
 ```ts
 import { createWalletClient, http, publicActions } from "viem";

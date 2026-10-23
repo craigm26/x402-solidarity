@@ -75,6 +75,15 @@ export interface LogChain {
    * it, a share whose authorization someone else executed first is reported uncollected.
    */
   findExactTransfer?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<{ transaction: string; token: string; to: string; value: bigint } | undefined>;
+  /**
+   * Optional: check an `exact` share with the facilitator's own scheme code, "as /verify and
+   * /settle would", with paymentPayload {x402Version: 2, accepted, payload} and
+   * paymentRequirements `accepted` (solidarity.md, "`PaymentRequired` and `PaymentPayload`").
+   * When present it replaces the offline EOA signature check, so smart-wallet signatures
+   * (ERC-1271, ERC-6492), the payer's balance and the nonce are checked as the scheme checks
+   * them. A thrown error skips the share with `bad-payment`; it never touches the purchase.
+   */
+  verifyExact?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 type ShareState = "pending" | "queued" | "collected" | "uncollected";
@@ -446,7 +455,19 @@ export class SolidarityLog {
       if (BigInt(p.authorization.validAfter) > BigInt(now)) throw new Skip("bad-payment", "validAfter in the future");
       if (BigInt(p.authorization.validBefore) < BigInt(now + VALID_BEFORE_BUFFER_SECONDS)) throw new Skip("bad-payment", "validBefore passed");
       // The EIP-712 domain comes from the descriptor entry's extra (checked equal above).
-      if (!(await verifyEip3009Signature({ ...accepted, extra: entry.extra }, p))) throw new Skip("bad-payment", "signature");
+      // With the facilitator's scheme code (verifyExact), the share is checked as /verify would
+      // check it; without it, offline, which covers EOA signatures only.
+      if (this.chain.verifyExact) {
+        let v: { ok: true } | { ok: false; error: string };
+        try {
+          v = await this.chain.verifyExact({ ...accepted, extra: entry.extra }, p);
+        } catch (e) {
+          throw new Skip("bad-payment", `scheme verify failed: ${(e as Error)?.message ?? String(e)}`);
+        }
+        if (!v.ok) throw new Skip("bad-payment", `scheme verify: ${v.error}`);
+      } else if (!(await verifyEip3009Signature({ ...accepted, extra: entry.extra }, p))) {
+        throw new Skip("bad-payment", "signature");
+      }
     } else {
       const p = payment.payload;
       if (!isBatchVoucherPayload(p)) throw new Skip("bad-payment", "not a voucher payload");

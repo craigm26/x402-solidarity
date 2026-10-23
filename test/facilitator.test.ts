@@ -289,6 +289,54 @@ test("an exact share the seller submitted first is still collected, under the se
   assert.equal(JSON.parse(w.log.handle(`/proofs/${info.id}`).body).status, "included");
 });
 
+test("with verifyExact (the facilitator's own scheme code) the log uses the scheme's verdict on an exact share, not its offline signature check", async () => {
+  const w = await world();
+  const accepted = w.req("48000000");
+  const calls: Array<[PaymentRequirements, S.ExactEip3009Payload]> = [];
+  const logWith = (verifyExact: S.LogChain["verifyExact"]) =>
+    new S.SolidarityLog({
+      descriptor: DESCRIPTOR,
+      key: w.key,
+      clock: () => w.chain.now,
+      chain: {
+        submitExact: (a, p) => w.chain.submitExact(a, p),
+        channelState: (id) => w.chain.channelState(id),
+        claim: (id, v, t) => w.chain.claim(id, v, t),
+        verifyExact: async (a, p) => {
+          calls.push([a, p]);
+          return (verifyExact as NonNullable<S.LogChain["verifyExact"]>)(a, p);
+        },
+      },
+    });
+
+  // The scheme refuses a share the offline check would pass (say, the payer cannot cover it).
+  const refusing = logWith(async () => ({ ok: false, error: "invalid_exact_evm_insufficient_balance" }));
+  const good = await w.share(accepted);
+  const a = await refusing.onSettled(w.payload(accepted, good), accepted, w.ok());
+  assert.deepEqual([a.outcome?.status, a.outcome?.reason], ["skipped", "bad-payment"]);
+  const pay = good.payment as NonNullable<SolidarityInfo["payment"]>;
+  assert.deepEqual(calls[0], [pay.accepted, pay.payload], "the share's own accepted and payload");
+  for (const k of CORE) assert.deepEqual(a.settleResponse[k], w.ok()[k], k);
+
+  // The scheme accepts a signature the offline EOA check cannot (say, an ERC-1271 wallet's).
+  const accepting = logWith(async () => ({ ok: true }));
+  const other = await w.share(accepted);
+  const p = (other.payment as NonNullable<SolidarityInfo["payment"]>).payload as unknown as S.ExactEip3009Payload;
+  p.signature = `0x${"11".repeat(65)}`;
+  const b = await accepting.onSettled(w.payload(accepted, other), accepted, w.ok());
+  assert.equal(b.outcome?.status, "accepted");
+  await b.followUp;
+
+  // A scheme check that throws skips the share, and only the share.
+  const throwing = logWith(async () => {
+    throw new Error("rpc down");
+  });
+  const third = await w.share(accepted);
+  const c = await throwing.onSettled(w.payload(accepted, third), accepted, w.ok());
+  assert.deepEqual([c.outcome?.status, c.outcome?.reason], ["skipped", "bad-payment"]);
+  assert.equal(c.settleResponse.success, true);
+});
+
 test("a claim that keeps failing holds a statement only until the claim grace runs out; then the channel recovers", async () => {
   const w = await world();
   w.chain.deposit(w.config, 1_000_000n);

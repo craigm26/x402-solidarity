@@ -27,8 +27,8 @@ export type { ProcessResult, SolidarityFacilitator, SolidarityFacilitatorOptions
 export { facilitatorLogChain } from "./logChain.ts";
 export type { FacilitatorLogChainOptions, ShareSettler } from "./logChain.ts";
 
-export { facilitatorFetchHandler } from "./http.ts";
-export type { FacilitatorHandlerOptions } from "./http.ts";
+export { facilitatorFetchHandler, fetchRequestFromNode } from "./http.ts";
+export type { FacilitatorHandlerOptions, NodeRequestLike } from "./http.ts";
 
 // The reference implementation, unchanged, for the pieces each role also needs.
 export {

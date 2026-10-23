@@ -25,12 +25,12 @@ import type { FacilitatorEvmSigner } from "@x402/evm";
 import { decodePaymentResponseHeader, wrapFetchWithPayment } from "@x402/fetch";
 import { SimulatedChain } from "../../../src/sim/chain.ts";
 import { BASE_SEPOLIA, CapCounter, declareSolidarityExtension, generateSigningKey, readOutcome, SolidarityLog, USDC_BASE_SEPOLIA, verifyEip3009Signature } from "../../../src/solidarity/index.ts";
-import type { ExactEip3009Payload, LogDescriptor, OwnerPolicy, ShareDecision, SigningKey, SolidarityOutcome } from "../../../src/solidarity/index.ts";
+import type { ExactEip3009Payload, LogChain, LogDescriptor, OwnerPolicy, ShareDecision, SigningKey, SolidarityOutcome } from "../../../src/solidarity/index.ts";
 import { solidarityClientExtension } from "../src/client.ts";
 import type { SolidarityClientOptions } from "../src/client.ts";
 import { createDescriptorCache } from "../src/descriptors.ts";
 import { attachSolidarity } from "../src/facilitator.ts";
-import type { SolidarityFacilitator } from "../src/facilitator.ts";
+import type { SolidarityFacilitator, SolidarityFacilitatorOptions } from "../src/facilitator.ts";
 import { facilitatorLogChain } from "../src/logChain.ts";
 import { solidarityServerExtension } from "../src/resourceServer.ts";
 import type { SolidarityServerOptions } from "../src/resourceServer.ts";
@@ -80,8 +80,13 @@ export interface SimulatedSigner extends FacilitatorEvmSigner {
   readonly calls: string[];
   /** Every transfer executed through writeContract, in order. */
   readonly writes: Array<{ tx: string; token: string; from: string; to: string; value: bigint }>;
-  /** The next n receipt waits time out, so the scheme reports settlement_pending. */
-  failNextReceipt(n?: number): void;
+  /**
+   * The next n receipt waits time out, so the scheme reports settlement_pending.
+   * `to` limits it to transfers to that address (the fund: the share's own settle);
+   * `advanceSeconds` moves the simulated clock that far before the wait gives up, as a
+   * real timeout would (toFacilitatorEvmSigner waits 180 s by default).
+   */
+  failNextReceipt(n?: number, opts?: { to?: string; advanceSeconds?: number }): void;
   /** The next writeContract reverts with this message (a failed purchase settle). */
   revertNextWrite(message?: string): void;
 }
@@ -100,6 +105,7 @@ export function simulatedFacilitatorSigner(chain: SimulatedChain, opts: { tokens
   const writes: SimulatedSigner["writes"] = [];
   const executed = new Map<string, { token: Hex; from: Hex; to: Hex; value: bigint }>();
   let failReceipts = 0;
+  let failRule: { to?: string; advanceSeconds?: number } = {};
   let revert: string | undefined;
   const sync = () => {
     chain.now = nowSeconds();
@@ -124,8 +130,9 @@ export function simulatedFacilitatorSigner(chain: SimulatedChain, opts: { tokens
     address,
     calls,
     writes,
-    failNextReceipt(n = 1) {
+    failNextReceipt(n = 1, rule = {}) {
       failReceipts = n;
+      failRule = rule;
     },
     revertNextWrite(message = "simulated revert") {
       revert = message;
@@ -175,11 +182,12 @@ export function simulatedFacilitatorSigner(chain: SimulatedChain, opts: { tokens
     },
     async waitForTransactionReceipt({ hash }) {
       calls.push("waitForTransactionReceipt");
-      if (failReceipts > 0) {
+      const t = executed.get(hash);
+      if (failReceipts > 0 && (!failRule.to || t?.to.toLowerCase() === failRule.to.toLowerCase())) {
         failReceipts -= 1;
+        if (failRule.advanceSeconds) mock.timers.setTime(Date.now() + failRule.advanceSeconds * 1000);
         throw new Error("simulated receipt timeout");
       }
-      const t = executed.get(hash);
       if (!t) throw new Error("unknown transaction");
       const topics = encodeEventTopics({ abi: transferEvent, eventName: "Transfer", args: { from: t.from, to: t.to } });
       const data = encodeAbiParameters([{ type: "uint256" }], [t.value]);
@@ -277,6 +285,10 @@ export interface WorldOptions {
   price?: string;
   /** Build the seller's FacilitatorClient (default: in-process with a JSON round trip). */
   facilitatorClient?: (parts: { facilitator: x402Facilitator; solidarity?: SolidarityFacilitator }) => FacilitatorClient;
+  /** Build the log's chain (default: facilitatorLogChain(exact, { fallback: chain })). */
+  logChain?: (parts: { exact: ExactEvmFacilitator; chain: SimulatedChain }) => LogChain;
+  /** More options for attachSolidarity (decisionTimeoutMs, onFollowUp, onError). */
+  facilitatorOptions?: Partial<SolidarityFacilitatorOptions>;
 }
 
 export interface BuyResult {
@@ -296,9 +308,10 @@ export async function makeWorld(opts: WorldOptions = {}) {
 
   const logKey: SigningKey = generateSigningKey("EdDSA", "did:web:facilitator.example#solidarity-1");
   const descriptor = makeDescriptor(logKey.kid, opts.descriptor);
-  const log = new SolidarityLog({ descriptor, key: logKey, chain: facilitatorLogChain(exact, { fallback: chain }) });
+  const log = new SolidarityLog({ descriptor, key: logKey, chain: opts.logChain ? opts.logChain({ exact, chain }) : facilitatorLogChain(exact, { fallback: chain }) });
   const facilitatorErrors: Array<{ error: unknown; where: string }> = [];
-  const solidarity = opts.kitFacilitator === false ? undefined : attachSolidarity(facilitator, { log, onError: (error, where) => facilitatorErrors.push({ error, where }) });
+  const solidarity =
+    opts.kitFacilitator === false ? undefined : attachSolidarity(facilitator, { log, onError: (error, where) => facilitatorErrors.push({ error, where }), ...opts.facilitatorOptions });
 
   const record = { settles: [] as SettleResponse[] };
   const facilitatorClient = opts.facilitatorClient ? opts.facilitatorClient({ facilitator, solidarity }) : inProcessFacilitatorClient(facilitator, record);

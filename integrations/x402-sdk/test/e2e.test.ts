@@ -13,7 +13,8 @@ import type { PaymentPayload } from "@x402/core/types";
 import { resetAssetContractCache } from "@x402/evm";
 import { openClientChannel, staticResolver, validateOutcome, verifyReceipt } from "../../../src/solidarity/index.ts";
 import type { ClientChannel, LogDescriptor, PublishedStatement } from "../../../src/solidarity/index.ts";
-import { AUTHORIZER, coreBytes, FUND_ADDR, lastShareId, LOG, makeWorld, NET, OTHER_FUND, OTHER_FUND_ADDR, PRICE_ATOMIC, resetTime, setSimulatedTime, USDC, useSimulatedTime } from "./harness.ts";
+import { facilitatorLogChain } from "../src/logChain.ts";
+import { AUTHORIZER, coreBytes, FUND_ADDR, lastShareId, LOG, makeDescriptor, makeWorld, NET, OTHER_FUND, OTHER_FUND_ADDR, PRICE_ATOMIC, resetTime, setSimulatedTime, T0, USDC, useSimulatedTime } from "./harness.ts";
 import type { World } from "./harness.ts";
 
 beforeEach(() => {
@@ -116,6 +117,185 @@ test("settlement_pending twice: pending (not duplicate); a later resolvePending 
   await w.solidarity?.drain();
   assert.equal(w.fundBalance(), SHARE);
   assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "queued");
+});
+
+/** The descriptor with its exact entry's maxTimeoutSeconds set: the share's window after the purchase's. */
+const exactWindow = (seconds: number) => ({ accepts: makeDescriptor("unused").accepts?.map((a) => (a.scheme === "exact" ? { ...a, maxTimeoutSeconds: seconds } : a)) });
+
+test("settlement_pending after a real receipt timeout (180 s): with a 600-second share window the held share is still collected", async () => {
+  const w = await makeWorld({ descriptor: exactWindow(600) });
+  // The first receipt wait takes toFacilitatorEvmSigner's default 180 s and gives up.
+  w.signer.failNextReceipt(1, { advanceSeconds: 180 });
+  const r = await w.buy();
+  assert.equal(r.status, 200, r.body);
+  assert.equal(w.settles[0].errorReason, "settlement_pending");
+  assert.equal(r.outcome?.status, "accepted", JSON.stringify(r.outcome));
+  const share = w.decisions.find((d) => d.attached);
+  const auth = (share?.attached ? share.info.payment?.payload : undefined) as unknown as { authorization: { validBefore: string } };
+  assert.equal(Number(auth.authorization.validBefore), T0 / 1000 + 60 + 600, "the purchase's validBefore plus the entry's 600 s");
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), SHARE);
+  assert.equal(w.solidarity?.held.size, 0);
+
+  // The same timing with the 60-second minimum: the share has expired by the time the purchase confirms.
+  resetAssetContractCache();
+  const short = await makeWorld({ descriptor: exactWindow(60) });
+  short.signer.failNextReceipt(1, { advanceSeconds: 180 });
+  const s = await short.buy();
+  assert.equal(s.status, 200, "the purchase itself is fine");
+  assert.equal(s.outcome?.status, "skipped");
+  assert.equal(s.outcome?.reason, "bad-payment");
+  await short.solidarity?.drain();
+  assert.equal(short.fundBalance(), 0n);
+  assert.equal(short.solidarity?.held.size, 0);
+});
+
+test("a held share expires when its window closes: dropped as purchase-not-final, /proofs 404, nothing left held", async () => {
+  const w = await makeWorld();
+  w.signer.failNextReceipt(2);
+  const r = await w.buy();
+  assert.equal(r.outcome?.status, "pending");
+  const id = r.outcome.id;
+  const tx = r.paymentResponse?.transaction as string;
+  assert.equal(w.solidarity?.held.size, 1);
+  // The share's validBefore is T0 + 120; the log needs 6 seconds to spare.
+  setSimulatedTime(T0 + 114_000);
+  assert.deepEqual(await w.solidarity?.expireHeld(), [], "still inside its window");
+  setSimulatedTime(T0 + 115_000);
+  assert.deepEqual(await w.solidarity?.expireHeld(), [{ transaction: tx, id }]);
+  assert.equal(w.solidarity?.held.size, 0);
+  assert.equal(w.log.handle(`/proofs/${id}`).status, 404, "no longer reported pending");
+  assert.equal(await w.solidarity?.resolvePending(tx, true), undefined, "nothing left to resolve");
+  assert.equal(w.fundBalance(), 0n);
+});
+
+test("a share whose own receipt wait stays settlement_pending is settled again until it confirms, and is in the month's batch (no findExactTransfer)", async () => {
+  const waits: number[] = [];
+  // As the README wires it: the operator's scheme, no fallback.
+  const w = await makeWorld({ logChain: ({ exact }) => facilitatorLogChain(exact, { sleep: async (ms) => void waits.push(ms) }) });
+  w.signer.failNextReceipt(4, { to: FUND_ADDR });
+  const r = await w.buy();
+  assert.equal(r.outcome?.status, "accepted");
+  const id = r.outcome.id;
+  await w.solidarity?.drain();
+  assert.deepEqual(waits, [5000, 10000, 20000, 40000], "four more settles, the wait doubling");
+  assert.equal(w.signer.writes.filter((x) => x.to.toLowerCase() === FUND_ADDR).length, 1, "broadcast once; each retry re-waited on it");
+  assert.equal(w.fundBalance(), SHARE);
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "queued");
+  setSimulatedTime(Date.UTC(2026, 10, 2, 0, 0, 0));
+  await w.log.closePeriod("2026-10");
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "included");
+  assert.match(w.log.handle("/settlements/2026-10").body, /exact:0x[0-9a-f]{64}/);
+});
+
+test("a share receipt that never comes: queued while it is asked again, until validBefore + pendingGraceSeconds", async () => {
+  for (const withFinder of [false, true]) {
+    resetAssetContractCache();
+    setSimulatedTime(T0);
+    const seen: string[] = [];
+    let w: World | undefined;
+    const sleep = async (ms: number) => {
+      const id = w ? lastShareId(w) : undefined;
+      if (w && id) seen.push(JSON.parse(w.log.handle(`/proofs/${id}`).body).status);
+      setSimulatedTime(Date.now() + ms);
+    };
+    w = await makeWorld({
+      logChain: ({ exact, chain }) => facilitatorLogChain(exact, { pendingGraceSeconds: 120, retryDelayMs: () => 30_000, sleep, ...(withFinder ? { fallback: chain } : {}) }),
+    });
+    w.signer.failNextReceipt(1000, { to: FUND_ADDR });
+    const r = await w.buy();
+    assert.equal(r.outcome?.status, "accepted");
+    await w.solidarity?.drain();
+    // validBefore is T0 + 120, so it gives up after T0 + 240: nine 30-second waits.
+    assert.equal(seen.length, 9);
+    assert.ok(seen.every((x) => x === "queued"), seen.join());
+    assert.equal(w.fundBalance(), SHARE, "the transfer did execute; only its receipt never came");
+    const status = JSON.parse(w.log.handle(`/proofs/${r.outcome.id}`).body).status;
+    // Past the bound only findExactTransfer (an RPC client reading events) can still find it.
+    assert.equal(status, withFinder ? "queued" : "uncollected");
+  }
+});
+
+test("a channel claim stuck on chain does not hold up the next purchase: its response goes out without an entry, and the decision lands later", async () => {
+  let channel: ClientChannel | undefined;
+  const w = await makeWorld({ price: "$0.05", clientOptions: { channelFor: () => channel }, facilitatorOptions: { decisionTimeoutMs: 500 } });
+  const config = {
+    payer: w.account.address,
+    payerAuthorizer: w.account.address,
+    receiver: FUND_ADDR as `0x${string}`,
+    receiverAuthorizer: AUTHORIZER as `0x${string}`,
+    token: USDC,
+    withdrawDelay: 86400,
+    salt: `0x${"03".padStart(64, "0")}` as `0x${string}`,
+  };
+  const cid = w.chain.deposit(config, 1_000n);
+  channel = openClientChannel(NET, config);
+  // A withdrawal is pending, so each accepted share is claimed at once, under the channel's lock.
+  w.chain.initiateWithdrawal(cid);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const safety = setTimeout(() => release(), 5000); // never hang, even if the purchase does wait
+  const realClaim = w.chain.claim.bind(w.chain);
+  (w.chain as { claim: typeof realClaim }).claim = async (...a: Parameters<typeof realClaim>) => {
+    await gate;
+    return realClaim(...a);
+  };
+
+  const first = await w.buy();
+  assert.equal(first.outcome?.status, "accepted", JSON.stringify(first.outcome));
+  const started = performance.now();
+  const second = await w.buy();
+  const ms = performance.now() - started;
+  assert.equal(second.status, 200, second.body);
+  assert.ok(ms < 3000, `the purchase waited ${Math.round(ms)} ms for a claim`);
+  assert.equal(second.outcome, undefined, "no entry: the log had not decided in time");
+  assert.ok(w.facilitatorErrors.some((e) => e.where === "process"));
+  const id2 = lastShareId(w) as string;
+
+  release();
+  clearTimeout(safety);
+  await w.solidarity?.drain();
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${id2}`).body).status, "queued", "decided in the background");
+  assert.equal(w.chain.channelState(cid)?.totalClaimed, 100n, "both shares claimed");
+});
+
+test("the log checks an exact share with the operator's scheme code: a buyer who cannot cover the share gets bad-payment, not accepted then uncollected", async () => {
+  const w = await makeWorld();
+  const verified: Array<[unknown, unknown]> = [];
+  const realVerify = w.exact.verify.bind(w.exact);
+  w.exact.verify = async (p, q, c) => {
+    verified.push([p, q]);
+    return realVerify(p, q, c);
+  };
+  const r = await w.buy();
+  assert.equal(r.outcome?.status, "accepted");
+  const share = w.decisions.find((d) => d.attached);
+  const payment = share?.attached ? share.info.payment : undefined;
+  assert.ok(payment);
+  const forShare = verified.filter(([, q]) => (q as { payTo: string }).payTo.toLowerCase() === FUND_ADDR);
+  assert.equal(forShare.length, 1, "the share went through the scheme's verify once");
+  assert.deepEqual(forShare[0], [{ x402Version: 2, accepted: payment.accepted, payload: payment.payload }, payment.accepted]);
+  await w.solidarity?.drain();
+
+  // A buyer with exactly the purchase price: the scheme's simulation refuses the share.
+  resetAssetContractCache();
+  const poor = await makeWorld();
+  poor.chain.transfer(USDC, poor.account.address, OTHER_FUND_ADDR, poor.balanceOf(poor.account.address) - PRICE_ATOMIC);
+  const p = await poor.buy();
+  assert.equal(p.status, 200, "the purchase settles");
+  assert.equal(p.outcome?.status, "skipped");
+  assert.equal(p.outcome?.reason, "bad-payment");
+  assert.equal(poor.log.handle(`/proofs/${p.outcome.id}`).status, 404);
+});
+
+test("an onFollowUp that throws changes nothing: the share is still accepted and collected", async () => {
+  const w = await makeWorld({ facilitatorOptions: { onFollowUp: () => { throw new Error("waitUntil exploded"); } } });
+  const r = await w.buy();
+  assert.equal(r.status, 200);
+  assert.equal(r.outcome?.status, "accepted");
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), SHARE);
+  assert.ok(w.facilitatorErrors.some((e) => e.where === "onFollowUp"));
 });
 
 /** A client extension registered after the kit's that rewrites the share, as a relaying seller could. */

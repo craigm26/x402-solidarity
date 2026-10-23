@@ -11,7 +11,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { HTTPFacilitatorClient } from "@x402/core/http";
 import { resetAssetContractCache } from "@x402/evm";
 import { createDescriptorCache } from "../src/descriptors.ts";
-import { facilitatorFetchHandler } from "../src/http.ts";
+import { facilitatorFetchHandler, fetchRequestFromNode } from "../src/http.ts";
 import { lastShareId, LOG, makeWorld, NET, resetTime, useSimulatedTime } from "./harness.ts";
 
 const FACILITATOR = "https://facilitator.example";
@@ -78,6 +78,49 @@ test("a failed settle answers HTTP 200 and keeps its outcome all the way to the 
   assert.equal(r.paymentResponse?.success, false);
   assert.equal(r.outcome?.status, "skipped");
   assert.equal(r.outcome?.reason, "purchase-not-final");
+});
+
+test("a settle that throws (nothing recovered it) is still HTTP 200, a failed SettleResponse, and its share gets purchase-not-final", async () => {
+  const w = await overHttp();
+  w.exact.settle = async () => {
+    throw new Error("scheme threw");
+  };
+  const r = await w.buy();
+  assert.equal(r.status, 402);
+  assert.equal(seen.find((s) => s.path === "/settle")?.status, 200);
+  assert.equal(r.paymentResponse?.success, false);
+  assert.equal(r.paymentResponse?.errorReason, "unexpected_settle_error");
+  assert.equal(r.outcome?.status, "skipped");
+  assert.equal(r.outcome?.reason, "purchase-not-final");
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), 0n);
+});
+
+test("fetchRequestFromNode (the README's node:http bridge): the Host header never routes, and only a plain path is accepted", async () => {
+  const origin = "https://facilitator.example";
+  const node = (url: string | undefined, headers: Record<string, string | string[]> = {}, method = "GET", body?: string) => ({
+    method,
+    url,
+    headers,
+    async *[Symbol.asyncIterator]() {
+      if (body !== undefined) yield Buffer.from(body);
+    },
+  });
+  // A Host chosen to turn a proofs request into /settle, as `https://${host}${url}` would.
+  const hostile = await fetchRequestFromNode(node("/solidarity/proofs/x", { host: "facilitator.example/settle?" }), origin);
+  assert.equal(new URL(hostile?.url as string).pathname, "/solidarity/proofs/x");
+  assert.equal(new URL(hostile?.url as string).host, "facilitator.example");
+  // A path that starts with two slashes stays that path.
+  assert.equal(new URL((await fetchRequestFromNode(node("//evil.example/settle"), origin))?.url as string).pathname, "//evil.example/settle");
+  // Targets the handler would route differently from a proxy reading the raw path: refused (a 400).
+  for (const bad of [undefined, "", "*", "settle", "http://facilitator.example/settle", "/solidarity/../settle", "/x/%2e%2e/settle"]) {
+    assert.equal(await fetchRequestFromNode(node(bad), origin), undefined, String(bad));
+  }
+  const post = await fetchRequestFromNode(node("/settle?x=1", { "content-type": "application/json", "x-many": ["a", "b"] }, "POST", '{"a":1}'), origin);
+  assert.equal(post?.method, "POST");
+  assert.equal(new URL(post?.url as string).search, "?x=1");
+  assert.equal(post?.headers.get("x-many"), "a, b");
+  assert.equal(await post?.text(), '{"a":1}');
 });
 
 test("the log's read endpoints are served under its URL, and the buyer's cache accepts the descriptor", async () => {

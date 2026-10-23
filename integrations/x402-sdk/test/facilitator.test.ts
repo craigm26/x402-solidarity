@@ -12,7 +12,7 @@ import { resetAssetContractCache } from "@x402/evm";
 import { readOutcome, SolidarityLog } from "../../../src/solidarity/index.ts";
 import { solidarityFacilitator } from "../src/facilitator.ts";
 import { facilitatorLogChain } from "../src/logChain.ts";
-import { makeWorld, NET, resetTime, useSimulatedTime } from "./harness.ts";
+import { makeWorld, NET, resetTime, setSimulatedTime, useSimulatedTime } from "./harness.ts";
 import type { World } from "./harness.ts";
 
 beforeEach(() => {
@@ -68,6 +68,54 @@ test("canary for the pinned SDK: settle() returns the very object its after-sett
   assert.equal(readOutcome(r as { extensions?: Record<string, unknown> })?.status, "accepted");
 });
 
+test("canary for the pinned SDK: after-settle hooks run on failed results too (a failed transfer, settlement_pending), although its typings say successful", async () => {
+  // The kit's pending holds and its purchase-not-final outcomes depend on this.
+  const w = await makeWorld();
+  const seen: Array<[boolean, string | undefined]> = [];
+  w.facilitator.onAfterSettle(async (ctx) => void seen.push([ctx.result.success, ctx.result.errorReason]));
+  w.signer.revertNextWrite();
+  const a = await signedPurchase(w);
+  const failed = await w.facilitator.settle(a.payload, a.requirements);
+  assert.equal(failed.success, false);
+  w.signer.failNextReceipt(1);
+  const b = await signedPurchase(w);
+  const pending = await w.facilitator.settle(b.payload, b.requirements);
+  assert.equal(pending.errorReason, "settlement_pending");
+  assert.deepEqual(seen, [[false, failed.errorReason], [false, "settlement_pending"]], "if a future @x402/core runs these hooks on success only, pending shares are never held");
+  assert.equal(readOutcome(failed as { extensions?: Record<string, unknown> })?.reason, "purchase-not-final");
+  assert.equal(readOutcome(pending as { extensions?: Record<string, unknown> })?.status, "pending");
+});
+
+test("a settle recovered in onSettleFailure runs no after-settle hook (canary); the operator runs solidarity.afterSettle on the recovered result", async () => {
+  const w = await makeWorld();
+  const realSettle = w.exact.settle.bind(w.exact);
+  let settled: SettleResponse | undefined;
+  w.exact.settle = async (p, q, c) => {
+    const r = await realSettle(p, q, c);
+    // The purchase is broadcast and confirmed, then the RPC errors. (The share's own settle carries no extensions.)
+    if ((p.extensions as Record<string, unknown> | undefined)?.solidarity) {
+      settled = r;
+      throw new Error("rpc error after broadcast");
+    }
+    return r;
+  };
+  const hooksSaw: unknown[] = [];
+  w.facilitator.onAfterSettle(async (ctx) => void hooksSaw.push(ctx.result));
+  w.facilitator.onSettleFailure(async (ctx) => {
+    if (!settled?.success) return undefined;
+    await w.solidarity?.afterSettle({ ...ctx, result: settled }); // as the README says
+    return { recovered: true, result: settled };
+  });
+  const { payload, requirements, id } = await signedPurchase(w);
+  const r = await w.facilitator.settle(payload, requirements);
+  assert.equal(r.success, true);
+  assert.deepEqual(hooksSaw, [], "if a future @x402/core runs after-settle hooks on recovered results, drop the afterSettle call from the recovery hook (it would answer duplicate)");
+  assert.equal(readOutcome(r as { extensions?: Record<string, unknown> })?.status, "accepted");
+  await w.solidarity?.drain();
+  assert.equal(w.fundBalance(), 500n);
+  assert.equal(JSON.parse(w.log.handle(`/proofs/${id}`).body).status, "queued");
+});
+
 test("if the log throws, the purchase still settles, with no solidarity entry, and nothing reaches onSettleFailure", async () => {
   const w = await makeWorld();
   const failures: unknown[] = [];
@@ -85,6 +133,18 @@ test("if the log throws, the purchase still settles, with no solidarity entry, a
   assert.deepEqual(failures, []);
   assert.equal(w.facilitatorErrors.length, 1);
   assert.equal(w.facilitatorErrors[0].where, "afterSettle");
+
+  // The same with an onError that throws as well.
+  const w2 = await makeWorld({ facilitatorOptions: { onError: () => { throw new Error("the reporter exploded too"); } } });
+  w2.facilitator.onSettleFailure(async (ctx) => void failures.push(ctx.error));
+  w2.log.onSettled = async () => {
+    throw new Error("log exploded");
+  };
+  const second = await signedPurchase(w2);
+  const r2 = await w2.facilitator.settle(second.payload, second.requirements);
+  assert.equal(r2.success, true);
+  assert.equal(r2.extensions?.solidarity, undefined);
+  assert.deepEqual(failures, []);
 });
 
 test("if the log changes a core field, the hook puts it back and drops the entry", async () => {
@@ -140,7 +200,7 @@ test("a share whose transfer cannot be submitted: purchase settled, share accept
   assert.equal(w.fundBalance(), 0n);
 });
 
-test("process() is pure: the operator's own wrapper gets the same outcome without the hook", async () => {
+test("process() leaves its inputs alone and returns a new object: the operator's own wrapper gets the outcome and the seller's status without the hook", async () => {
   const w = await makeWorld({ kitFacilitator: false });
   const ext = solidarityFacilitator({ log: w.log });
   w.facilitator.registerExtension(ext);
@@ -153,6 +213,36 @@ test("process() is pure: the operator's own wrapper gets the same outcome withou
   assert.notEqual(r.response, settled);
   assert.deepEqual(snapshotSettleResponseCore(r.response), snapshotSettleResponseCore(settled));
   assert.equal(readOutcome(r.response as { extensions?: Record<string, unknown> })?.status, "accepted");
+  assert.deepEqual(r.response.extensionResponses, { solidarity: { status: "accepted" } }, "for the seller, through EXTENSION-RESPONSES");
   await ext.drain();
   assert.equal(w.fundBalance(), 500n);
+  // Not pure: it recorded the share, so a second call for the same settle is a duplicate.
+  const again = await ext.process(payload, requirements, settled);
+  assert.equal(again.outcome?.reason, "duplicate");
+  // No share: still a new object, equal to the input.
+  const plain = { success: true, transaction: "0x01", network: NET } as SettleResponse;
+  const none = await ext.process({ ...payload, extensions: {} }, requirements, plain);
+  assert.notEqual(none.response, plain);
+  assert.deepEqual(none.response, plain);
+  assert.equal(none.outcome, undefined);
+});
+
+test("a share settle that fails with a transaction (a reverted transfer) is uncollected, and the month's files leave it out", async () => {
+  const w = await makeWorld();
+  const log = new SolidarityLog({
+    descriptor: w.descriptor,
+    key: w.logKey,
+    chain: facilitatorLogChain({ settle: async () => ({ success: false, errorReason: "transaction_failed", transaction: `0x${"ab".repeat(32)}`, network: NET }) }),
+  });
+  const ext = solidarityFacilitator({ log });
+  const { payload, requirements, id } = await signedPurchase(w);
+  const settled = await w.exact.settle(payload, requirements);
+  const r = await ext.process(payload, requirements, settled);
+  assert.equal(r.outcome?.status, "accepted");
+  await ext.drain();
+  assert.equal(JSON.parse(log.handle(`/proofs/${id}`).body).status, "uncollected");
+  setSimulatedTime(Date.UTC(2026, 10, 2, 0, 0, 0));
+  await log.closePeriod("2026-10");
+  assert.equal(log.handle("/lines/2026-10").body, "");
+  assert.equal(log.handle("/settlements/2026-10").body, "");
 });

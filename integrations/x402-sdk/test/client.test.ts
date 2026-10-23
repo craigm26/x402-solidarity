@@ -10,7 +10,7 @@ import { x402Client } from "@x402/core/client";
 import type { PaymentPayload, PaymentRequired } from "@x402/core/types";
 import { ExactEvmScheme as ExactEvmClient } from "@x402/evm/exact/client";
 import { CapCounter, declareSolidarityExtension, generateSigningKey, openClientChannel, shareNonce } from "../../../src/solidarity/index.ts";
-import type { ExactEip3009Payload, LogDescriptor, ShareDecision, SolidarityInfo, TypedDataSigner } from "../../../src/solidarity/index.ts";
+import type { ExactEip3009Payload, LogDescriptor, OwnerPolicy, ShareDecision, SolidarityInfo, TypedDataSigner } from "../../../src/solidarity/index.ts";
 import { solidarityClientExtension } from "../src/client.ts";
 import type { SolidarityClientOptions } from "../src/client.ts";
 import { createDescriptorCache } from "../src/descriptors.ts";
@@ -181,18 +181,54 @@ test("the owner's rules: untrusted log, a mandate held by another party, policy 
   assert.equal(off.counter.committed("2026-10"), 0n);
 });
 
+const outcomeFor = (id: string) => ({ success: true, transaction: "0x01", network: NET, extensions: { solidarity: { info: { status: "accepted", id, log: LOG, period: "2026-10", amount: "500" } } } });
+type ResponseHook = (d: unknown, ctx: never) => Promise<unknown>;
+const responseHook = (ext: ReturnType<typeof setup>["ext"]) => ext.hooks?.onPaymentResponse as unknown as ResponseHook;
+
 test("onPaymentResponse reports the outcome and never asks the transport to retry", async () => {
   const outcomes: unknown[] = [];
   const { client, ext } = setup({ onOutcome: (o) => outcomes.push(o) });
+  const hook = responseHook(ext);
   const pp = await client.createPaymentPayload(paymentRequired(declared()));
-  const id = infoOf(pp)?.id as string;
-  const settleResponse = { success: true, transaction: "0x01", network: NET, extensions: { solidarity: { info: { status: "accepted", id, log: LOG, period: "2026-10", amount: "500" } } } };
-  const hook = ext.hooks?.onPaymentResponse as NonNullable<NonNullable<typeof ext.hooks>["onPaymentResponse"]>;
+  const settleResponse = outcomeFor(infoOf(pp)?.id as string);
   assert.equal(await hook(undefined, { paymentPayload: pp, requirements: pp.accepted, settleResponse } as never), undefined);
   // An outcome for some other id is ignored: the entry is unsigned and relayed by the seller.
-  const forged = { ...settleResponse, extensions: { solidarity: { info: { status: "accepted", id: "x".repeat(22), log: LOG, period: "2026-10", amount: "500" } } } };
-  assert.equal(await hook(undefined, { paymentPayload: pp, requirements: pp.accepted, settleResponse: forged } as never), undefined);
+  const pp2 = await client.createPaymentPayload(paymentRequired(declared()));
+  const forged = outcomeFor("x".repeat(22));
+  assert.equal(await hook(undefined, { paymentPayload: pp2, requirements: pp2.accepted, settleResponse: forged } as never), undefined);
+  // A second response for a share already answered is not reported again.
+  assert.equal(await hook(undefined, { paymentPayload: pp, requirements: pp.accepted, settleResponse } as never), undefined);
   assert.deepEqual(outcomes, [settleResponse.extensions.solidarity.info, undefined]);
+});
+
+test("a seller that pre-fills a share in its declaration: no share is added, and its outcome is never reported as the owner's", async () => {
+  // The seller's "declaration" is a complete share, signed by a key of its own.
+  const sellerSide = setup();
+  const sellers = await sellerSide.client.createPaymentPayload(paymentRequired(declared()));
+  const prefilled = sellers.extensions?.solidarity as { info: SolidarityInfo; schema: unknown };
+  assert.ok(prefilled.info.payment);
+
+  const outcomes: unknown[] = [];
+  const buyer = setup({ onOutcome: (o) => outcomes.push(o) });
+  const pp = await buyer.client.createPaymentPayload(paymentRequired({ solidarity: structuredClone(prefilled) }));
+  assert.equal(buyer.decisions[0]?.attached, false, "the extension refused");
+  // x402Client keeps the seller's fields, so the payload still carries the seller's share...
+  assert.equal(infoOf(pp)?.id, prefilled.info.id);
+  // ...but the owner is never told its outcome.
+  const settleResponse = outcomeFor(prefilled.info.id as string);
+  assert.equal(await responseHook(buyer.ext)(undefined, { paymentPayload: pp, requirements: pp.accepted, settleResponse } as never), undefined);
+  assert.deepEqual(outcomes, []);
+  assert.equal(buyer.counter.committed("2026-10"), 0n);
+});
+
+test("an onError that throws changes nothing: the purchase is still signed, without a share", async () => {
+  const s = setup({
+    descriptors: { get: () => { throw new Error("cache exploded"); } },
+    onError: () => { throw new Error("the reporter exploded too"); },
+  });
+  const pp = await s.client.createPaymentPayload(paymentRequired(declared()));
+  assert.ok(pp.payload, "the purchase was signed");
+  assert.equal(infoOf(pp)?.payment, undefined);
 });
 
 test("the HTTP 402 hook warms the descriptor cache and returns at once", async () => {
@@ -210,6 +246,78 @@ test("the HTTP 402 hook warms the descriptor cache and returns at once", async (
   await new Promise((r) => setTimeout(r, 20)); // real timers: only Date is mocked
   assert.equal(cache.get(LOG)?.log, LOG, "and finished in the background");
   assert.deepEqual(fetched, [LOG]);
+});
+
+type RequiredHook = (d: unknown, c: unknown) => Promise<unknown>;
+const requiredHook = (ext: ReturnType<typeof setup>["ext"]) => (ext.transportHooks?.http as { onPaymentRequired: RequiredHook }).onPaymentRequired;
+
+test("the 402 hook never fetches a log the owner does not trust", async () => {
+  const fetched: string[] = [];
+  const cache = createDescriptorCache({ fetch: async (url) => (fetched.push(url), new Response(JSON.stringify({ ...descriptor, log: url }))) });
+  const { ext } = setup({ descriptors: cache }); // the policy lists LOG only
+  const other = declareSolidarityExtension([{ network: NET, scheme: "exact", log: "https://untrusted.example/solidarity" }]);
+  await requiredHook(ext)(other, { paymentRequired: paymentRequired({ solidarity: other }), requestUrl: "https://books.example/report" });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(fetched, []);
+});
+
+/** A declaration as a hostile seller would send it: any number of logs, even several per (network, scheme). */
+const rawDeclaration = (logs: Array<{ network: string; scheme: string; log: string }>) => ({ info: { version: 2, logs }, schema: declareSolidarityExtension([]).schema });
+
+test("one 402 starts few descriptor fetches: only logs for what it offers, at most four, and eight in flight", async () => {
+  const fetched: string[] = [];
+  const cache = createDescriptorCache({ fetch: async (url) => (fetched.push(url), new Response(JSON.stringify({ ...descriptor, log: url }))) });
+  const { logs: _drop, ...noLogs } = makePolicy(); // a policy that trusts any log
+  const { ext } = setup({ policy: noLogs as OwnerPolicy, descriptors: cache });
+  const hook = requiredHook(ext);
+  const many = rawDeclaration(Array.from({ length: 50 }, (_, i) => ({ network: NET, scheme: "exact", log: `https://log-${i}.example/solidarity` })));
+  await hook(many, { paymentRequired: paymentRequired({ solidarity: many }), requestUrl: "https://books.example/report" });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(fetched.length, 4);
+  // A log for a (network, scheme) this 402 does not offer is never fetched.
+  fetched.length = 0;
+  const elsewhere = declareSolidarityExtension([{ network: "eip155:1", scheme: "exact", log: "https://elsewhere.example/solidarity" }]);
+  await hook(elsewhere, { paymentRequired: paymentRequired({ solidarity: elsewhere }), requestUrl: "https://books.example/report" });
+  assert.deepEqual(fetched, []);
+
+  // Fetches that never finish: two 402s fill the eight slots, and a third starts none.
+  let started = 0;
+  const stuck = setup({ policy: noLogs as OwnerPolicy, descriptors: { get: () => undefined, refresh: () => ((started += 1), new Promise<void>(() => undefined)) } });
+  for (let round = 0; round < 3; round++) {
+    const decl = rawDeclaration(Array.from({ length: 10 }, (_, i) => ({ network: NET, scheme: "exact", log: `https://r${round}-${i}.example/solidarity` })));
+    await requiredHook(stuck.ext)(decl, { paymentRequired: paymentRequired({ solidarity: decl }), requestUrl: "https://books.example/report" });
+  }
+  assert.equal(started, 8);
+});
+
+test("the descriptor cache serves a stale entry at once and refreshes it behind; it keeps at most maxEntries fetched ones", async () => {
+  let t = 1_000;
+  const fetched: string[] = [];
+  const pinned = { ...descriptor, log: "https://pinned.example/solidarity" };
+  const cache = createDescriptorCache({
+    ttlSeconds: 10,
+    now: () => t,
+    maxEntries: 2,
+    preload: [pinned],
+    fetch: async (url) => (fetched.push(url), new Response(JSON.stringify({ ...descriptor, log: url }))),
+  });
+  await cache.refresh(LOG);
+  t += 11;
+  assert.equal(cache.get(LOG)?.log, LOG, "past its time to live, still served");
+  assert.deepEqual(fetched, [LOG, LOG], "and a refresh started");
+  await cache.refresh(LOG); // the one in flight
+  await cache.refresh("https://a.example/solidarity");
+  await cache.refresh("https://b.example/solidarity");
+  assert.equal(cache.get(LOG), undefined, "the least recently used fetched entry went");
+  assert.ok(cache.get("https://a.example/solidarity") && cache.get("https://b.example/solidarity"));
+  assert.equal(cache.get(pinned.log)?.log, pinned.log, "a preloaded entry is never evicted");
+});
+
+test("the descriptor cache never fetches a log URL that is not https", async () => {
+  const fetched: string[] = [];
+  const cache = createDescriptorCache({ fetch: async (url) => (fetched.push(url), new Response(JSON.stringify({ ...descriptor, log: url }))) });
+  await assert.rejects(cache.refresh("http://plain.example/solidarity"), /not https/);
+  assert.deepEqual(fetched, []);
 });
 
 test("the descriptor cache refuses a descriptor for another log or another version", async () => {

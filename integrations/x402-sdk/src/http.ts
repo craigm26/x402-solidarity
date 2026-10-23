@@ -19,10 +19,15 @@
  *   and is removed from the body. HTTPFacilitatorClient reads it from there
  *   for the seller; the buyer never sees it.
  *
+ * A settle that throws (nothing recovered it) is answered as a failed
+ * SettleResponse with HTTP 200, and its share gets `purchase-not-final`, as
+ * for a settle the scheme returned as failed.
+ *
  * The SDK ships no facilitator server, so this is the kit's own. It runs in
  * any runtime with Request and Response (Node 24, Workers, Deno, Bun). It has
  * no authentication, rate limits or body size limits: put it behind whatever
- * the operator already uses for those.
+ * the operator already uses for those. On node:http, `fetchRequestFromNode`
+ * builds the Request from a fixed origin, never from the Host header.
  */
 
 import type { x402Facilitator } from "@x402/core/facilitator";
@@ -31,8 +36,8 @@ import type { SolidarityFacilitator } from "./facilitator.ts";
 
 export interface FacilitatorHandlerOptions {
   facilitator: Pick<x402Facilitator, "verify" | "settle" | "getSupported">;
-  /** The attached solidarity extension, for the log's read endpoints. */
-  solidarity?: Pick<SolidarityFacilitator, "log">;
+  /** The attached solidarity extension: the log's read endpoints, and the outcome of a settle that threw. */
+  solidarity?: Pick<SolidarityFacilitator, "log"> & Partial<Pick<SolidarityFacilitator, "afterSettle">>;
   /** A path prefix for /verify, /settle and /supported, such as "/x402". Default "". */
   basePath?: string;
 }
@@ -81,6 +86,8 @@ export function facilitatorFetchHandler(opts: FacilitatorHandlerOptions): (req: 
         // Still a SettleResponse with HTTP 200, so the seller's SDK handles it as a failed settle.
         const message = (e as Error)?.message ?? "settle failed";
         result = { success: false, errorReason: "unexpected_settle_error", errorMessage: message, transaction: "", network: body.paymentRequirements.network } as SettleResponse;
+        // No after-settle hook ran: the share gets its purchase-not-final here (afterSettle is total).
+        await opts.solidarity?.afterSettle?.({ paymentPayload: body.paymentPayload, requirements: body.paymentRequirements, result });
       }
       const { extensionResponses, ...rest } = result as SettleResponse & { extensionResponses?: Record<string, unknown> };
       const headers: Record<string, string> = {};
@@ -99,4 +106,46 @@ export function facilitatorFetchHandler(opts: FacilitatorHandlerOptions): (req: 
 
     return json(404, { error: "not found" });
   };
+}
+
+/** The parts of a node:http IncomingMessage that `fetchRequestFromNode` reads. */
+export interface NodeRequestLike extends AsyncIterable<Uint8Array | string> {
+  method?: string;
+  url?: string;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+/**
+ * A fetch Request for a node:http request, built against a fixed origin such
+ * as "https://facilitator.example". The Host header is never used to build the
+ * URL: a client-chosen Host such as "facilitator.example/settle?" would
+ * otherwise route a request for one path to another, past a proxy that guards
+ * /settle or /verify by path. Returns undefined, for a 400, unless the request
+ * target is a path ("/...") that URL parsing leaves exactly as sent (no dot
+ * segments), so the handler routes on the path the proxy saw.
+ */
+export async function fetchRequestFromNode(req: NodeRequestLike, origin: string): Promise<Request | undefined> {
+  const target = req.url ?? "";
+  if (!target.startsWith("/")) return undefined;
+  const base = new URL(origin).origin;
+  let url: URL;
+  try {
+    url = new URL(base + target);
+  } catch {
+    return undefined;
+  }
+  if (url.origin !== base || url.pathname !== target.split(/[?#]/, 1)[0]) return undefined;
+  const method = (req.method ?? "GET").toUpperCase();
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (typeof v === "string") headers.append(k, v);
+    else if (Array.isArray(v)) for (const x of v) headers.append(k, x);
+  }
+  let body: Uint8Array | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    const chunks: Uint8Array[] = [];
+    for await (const c of req) chunks.push(typeof c === "string" ? Buffer.from(c) : c);
+    body = Buffer.concat(chunks);
+  }
+  return new Request(url, { method, headers, body });
 }
