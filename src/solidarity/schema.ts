@@ -119,7 +119,7 @@ export const ap2EnrollmentSchema = {
   type: "object",
   properties: {
     status: { enum: ["enrolled", "refused"] },
-    reason: { enum: ["bad-policy", "wrong-log", "fund-not-allowed", "superseded", "suspended"] },
+    reason: { enum: ["bad-policy", "wrong-log", "fund-not-allowed", "superseded", "stopped", "suspended"] },
     log: { type: "string", pattern: "^https://" },
   },
   required: ["status", "log"],

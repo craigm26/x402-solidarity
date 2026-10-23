@@ -417,8 +417,15 @@ export function mandatePolicy(m: Ap2SolidarityMandate): OwnerPolicy {
  * the payment with its own key (an x402 payment), which no holder sees.
  */
 export function mayAttachShare(mandates: unknown, self: string, credentialProvider: string | undefined): boolean {
-  if (!Array.isArray(mandates) || credentialProvider === undefined) return true;
-  return !mandates.some((m) => m && typeof m === "object" && m.vct === AP2_MANDATE_VCT && m.holder === credentialProvider && m.holder !== self);
+  if (credentialProvider === undefined) return true;
+  const list = Array.isArray(mandates) ? mandates : mandates && typeof mandates === "object" ? [mandates] : [];
+  return !list.some((m) => m && typeof m === "object" && m.vct === AP2_MANDATE_VCT && sameOrigin(m.holder, credentialProvider) && !sameOrigin(m.holder, self));
+}
+
+/** Two party identifiers name the same party: equal URL origins when both are URLs, else equal strings. */
+function sameOrigin(a: unknown, b: string): boolean {
+  if (typeof a !== "string") return false;
+  return URL.canParse(a) && URL.canParse(b) ? new URL(a).origin === new URL(b).origin : a === b;
 }
 
 /** Checksummed form of the account part of a CAIP-10 fund (for display). */

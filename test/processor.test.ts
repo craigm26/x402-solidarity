@@ -164,6 +164,11 @@ test("AP2 enrollment: every refusal reason", () => {
   p.onCollectionReversed("owner-7");
   assert.equal(reason(enroll(p, mandate({}, IAT + 60), "owner-7")), "suspended", "a newer mandate does not lift a suspension");
   assert.equal(reason(enroll(p, mandate(), "owner-7")), "suspended", "nor does a retry");
+  assert.equal(reason(enroll(p, mandate({ cap: { amount: 500, currency: "EUR" } }, IAT + 120), "owner-7")), "suspended", "nor a mandate in another currency");
+  assert.equal(status(enroll(p, mandate(), "owner-11")), "enrolled");
+  assert.equal(reason(enroll(p, mandate({ rate: "0.005" }), "owner-11")), "superseded", "an equal iat with other content");
+  p.stop("owner-11", "USD");
+  assert.equal(reason(enroll(p, mandate(), "owner-11")), "stopped", "a retry after the owner stopped it says so");
   assert.deepEqual([...new Set(seen)].sort(), [...S.AP2_REFUSAL_REASONS].sort(), "every reason exercised");
   assert.deepEqual([...S.ap2EnrollmentSchema.properties.reason.enum], [...S.AP2_REFUSAL_REASONS]);
 });
@@ -205,12 +210,13 @@ test("AP2: one policy per currency; a policy ends at its exp", () => {
 
 test("AP2: the owner can stop a policy at once, and a newer mandate starts it again", () => {
   const { p } = setup("keep");
+  const reason = (r: ReturnType<typeof enroll>) => status(r);
   assert.equal(status(enroll(p, mandate(), "owner-10")), "enrolled");
   assert.ok(p.recordPurchase({ owner: "owner-10", purchaseId: "s1", amount: "5000", asset: "USD" }));
   assert.equal(p.stop("owner-10", "USD"), true);
   assert.equal(p.stop("owner-10", "EUR"), false, "no EUR policy to stop");
   assert.equal(p.recordPurchase({ owner: "owner-10", purchaseId: "s2", amount: "5000", asset: "USD" }), undefined, "stopped: no share");
-  assert.equal(status(enroll(p, mandate(), "owner-10")), "enrolled", "a retry of the old mandate is answered, but does not restart it");
+  assert.equal(reason(enroll(p, mandate(), "owner-10")), "stopped", "a retry of the old mandate does not restart it");
   assert.equal(p.recordPurchase({ owner: "owner-10", purchaseId: "s3", amount: "5000", asset: "USD" }), undefined);
   assert.equal(status(enroll(p, mandate({}, IAT + 60), "owner-10")), "enrolled");
   assert.ok(p.recordPurchase({ owner: "owner-10", purchaseId: "s4", amount: "5000", asset: "USD" }), "a newer mandate is a new consent");

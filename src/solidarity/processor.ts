@@ -59,6 +59,8 @@ export class ProcessorHolder {
   readonly book: LogBook;
   private readonly clock: () => number;
   private readonly owners = new Map<string, Owner>();
+  /** Owners suspended after a reversed collection, in every currency, including ones they enroll later. */
+  private readonly suspendedOwners = new Set<string>();
   private readonly shares = new Map<string, ProcessorShare>();
   private readonly byPurchase = new Map<string, string>();
   private readonly payouts: Array<{ period: string; fund: string; asset: string; reference: string; amount: bigint }> = [];
@@ -92,9 +94,10 @@ export class ProcessorHolder {
    * `owner` is however the holder knows the owner. One policy per owner per
    * cap currency: a mandate with a later `iat` replaces the one for its
    * currency, keeps what the owner already committed that month and restarts
-   * a stopped policy; one with an earlier `iat` is refused as `superseded`; a
-   * retry of the enrolled mandate is answered `enrolled` again. A suspended
-   * owner is refused as `suspended`. On a refusal the holder's Mandate Receipt
+   * a stopped policy; one with an earlier or equal `iat` is refused as
+   * `superseded`; a retry of the enrolled mandate is answered `enrolled` again,
+   * or `stopped` if the owner has stopped it. A suspended owner is refused as
+   * `suspended`, in every currency. On a refusal the holder's Mandate Receipt
    * has `result: "error"` and `error: "invalid_mandate"`.
    */
   enrollAp2(p: { self: string; owner: string; mandate: unknown }): { receipt?: Ap2EnrollmentOutcome } {
@@ -115,14 +118,14 @@ export class ProcessorHolder {
     if (!this.book.descriptor.funds.includes(policy.fund)) return refuse("fund-not-allowed");
     const key = ownerKey(p.owner, policy.cap.asset);
     const known = this.owners.get(key);
-    // A retry of the mandate already enrolled gets the same answer.
+    // The holder suspended this owner after a reversed collection; no mandate lifts that.
+    if (this.suspendedOwners.has(p.owner)) return refuse("suspended");
+    // A retry of the mandate already enrolled gets the same answer, unless the owner has since stopped it.
     if (known && known.iat === mandate.iat && known.until === mandate.exp && policyHash(known.policy) === policyHash(policy)) {
-      return known.suspended ? refuse("suspended") : { receipt: { status: "enrolled", log } };
+      return known.counter.isOff ? refuse("stopped") : { receipt: { status: "enrolled", log } };
     }
     const knownSince = known ? (known.iat ?? Math.floor(Date.parse(known.policy.since) / 1000)) : undefined;
     if (knownSince !== undefined && knownSince >= mandate.iat) return refuse("superseded");
-    // The holder suspended this owner after a reversed collection; a new mandate does not lift that.
-    if (known?.suspended) return refuse("suspended");
     const counter = known ? known.counter.withPolicy(policy) : new CapCounter(policy);
     counter.turnOn(); // a newer mandate is a new consent, even after the owner stopped the old one
     this.owners.set(key, { policy, counter, credits: known?.credits ?? [], suspended: false, iat: mandate.iat, until: mandate.exp });
@@ -139,7 +142,7 @@ export class ProcessorHolder {
   recordPurchase(p: { owner: string; purchaseId: string; amount: string; asset: string }): string | undefined {
     const key = ownerKey(p.owner, p.asset);
     const o = this.owners.get(key);
-    if (!o || o.suspended || o.counter.isOff) return undefined;
+    if (!o || o.suspended || this.suspendedOwners.has(p.owner) || o.counter.isOff) return undefined;
     if (o.until !== undefined && this.clock() >= o.until) return undefined;
     if (this.byPurchase.has(p.purchaseId)) throw new Error("purchase already recorded");
     const period = periodOf(this.clock());
@@ -200,6 +203,7 @@ export class ProcessorHolder {
 
   /** The processor's own collection from the owner was reversed: the loss is the processor's; it may suspend the policy. */
   onCollectionReversed(owner: string): void {
+    this.suspendedOwners.add(owner);
     for (const [k, o] of this.owners) if (k.startsWith(`${owner}\n`)) o.suspended = true;
   }
 

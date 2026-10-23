@@ -178,7 +178,9 @@ test("exactly one policy holder: no share under a mandate whose holder is someon
   assert.equal(S.mayAttachShare(mandates, "agent-1", "https://other-cp.example"), true, "another credential provider is not the holder");
   assert.equal(S.mayAttachShare(mandates, cp, cp), true, "the holder itself");
   assert.equal(S.mayAttachShare([{ vct: "mandate.payment.open.1" }], "agent-1", cp), true, "other mandates don't name a holder");
-  for (const junk of [undefined, null, "x", { vct: S.AP2_MANDATE_VCT, holder: cp }, [null, 1, "x"]]) assert.equal(S.mayAttachShare(junk, "agent-1", cp), true, JSON.stringify(junk));
+  assert.equal(S.mayAttachShare({ vct: S.AP2_MANDATE_VCT, holder: cp }, "agent-1", cp), false, "a single mandate, not in a list");
+  assert.equal(S.mayAttachShare(mandates, "agent-1", "https://Processor.example/"), false, "the provider written another way is still the holder");
+  for (const junk of [undefined, null, "x", [null, 1, "x"]]) assert.equal(S.mayAttachShare(junk, "agent-1", cp), true, JSON.stringify(junk));
   assert.equal(S.mayAttachShare([], "agent-1"), true);
 });
 

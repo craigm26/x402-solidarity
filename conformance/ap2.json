@@ -296,6 +296,111 @@
       }
     },
     {
+      "name": "suspended-other-currency",
+      "self": "https://processor.example",
+      "owner": "c",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "EUR"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812920
+      },
+      "want": {
+        "status": "refused",
+        "reason": "suspended",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "d-enrolled",
+      "self": "https://processor.example",
+      "owner": "d",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812800
+      },
+      "want": {
+        "status": "enrolled",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "d-stops",
+      "owner": "d",
+      "event": "owner-stops",
+      "asset": "USD"
+    },
+    {
+      "name": "stopped-retry",
+      "self": "https://processor.example",
+      "owner": "d",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.01",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812800
+      },
+      "want": {
+        "status": "refused",
+        "reason": "stopped",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
+      "name": "superseded-equal-iat",
+      "self": "https://processor.example",
+      "owner": "d",
+      "mandate": {
+        "vct": "com.craigmerry.solidarity.1",
+        "holder": "https://processor.example",
+        "rate": "0.005",
+        "cap": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "fund": "https://fund.example/solidarity",
+        "logs": [
+          "https://processor.example/solidarity"
+        ],
+        "refunds": "keep",
+        "iat": 1790812800
+      },
+      "want": {
+        "status": "refused",
+        "reason": "superseded",
+        "log": "https://processor.example/solidarity"
+      }
+    },
+    {
       "name": "bad-policy-future-iat",
       "self": "https://processor.example",
       "owner": "b",
