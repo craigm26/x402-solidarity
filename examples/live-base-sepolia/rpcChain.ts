@@ -8,7 +8,8 @@
  * neither is the optional findExactTransfer: a share whose authorization
  * someone else submitted first is reported uncollected here.
  *
- * Not yet run against a live chain. SIMULATE=1 in index.ts checks the same
+ * Not yet run against a live chain (the live run on 2026-10-22 used
+ * FacilitatorLogChain). SIMULATE=1 in index.ts checks the same
  * transferWithAuthorization call against the deployed contract with eth_call.
  */
 

@@ -7,8 +7,8 @@ Please read this first:
 - **A proposal.** It is not part of x402 or any other protocol, and it has not been reviewed or endorsed by their maintainers.
 - **Not affiliated.** It is not affiliated with or endorsed by any company, the UN or any fund. I take no money from it.
 - **No fund exists.** Every fund address here is a placeholder (`0x...f00d`, `0x...beef`).
-- **Simulated.** Everything is tested offline against a simulated chain. No money moves.
-- **One live script, checked but not yet broadcast.** `examples/live-base-sepolia/` settles a purchase and its share on Base Sepolia, testnet only. Its `SIMULATE=1` mode runs both transfers against the deployed USDC contract with `eth_call`, needing no funds and sending nothing. That passes, and a test also checks five ways it must fail. No transaction has been sent yet.
+- **Simulated.** Everything except the one testnet run below is tested offline against a simulated chain. No money moves: test USDC has no value.
+- **One live script, run once on Base Sepolia.** `examples/live-base-sepolia/` settles a purchase and its share on Base Sepolia, testnet only, with test USDC that has no value. On 2026-10-22 it settled a 1 USDC [purchase](https://sepolia.basescan.org/tx/0x28b37a956391981ab4e11c313b9454d24bf7469364a6f9de071a544fb4bbab5c) (to the payer itself) and then its 0.001 USDC [share](https://sepolia.basescan.org/tx/0xd1e4a7fb3152953a4ddcec9daeb49b09edff94074e3eb69c6c976bda37002a70) to the placeholder fund, both through the public x402.org facilitator. Its `SIMULATE=1` mode checks both transfers against the deployed USDC contract with `eth_call` and sends nothing, and a test also checks five ways it must fail.
 - **Written with AI assistance** (Claude Code).
 
 The proposal and its simulated demos live at https://craigmerry.com/solidarity-levy/. The spec (draft 2, 2026-10-22) is the source of truth; where this code and the spec disagree, the spec wins and the code has a bug. It is three documents:

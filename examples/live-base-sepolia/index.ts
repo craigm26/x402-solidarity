@@ -113,7 +113,7 @@ const paymentPayload: PaymentPayload = { x402Version: 2, accepted: purchase, pay
 const settled = await log.onSettled(paymentPayload, purchase, settle);
 console.log("Log outcome:", settled.outcome);
 await settled.followUp;
-const record = log.inspect(decision.info.id as string) as { state?: string; transaction?: string } | undefined;
+const record = log.inspect(decision.info.id as string) as { state?: string; exact?: { transaction?: string } } | undefined;
 console.log("Share record:", record);
-if (record?.transaction) console.log(`Share transfer: ${tx(record.transaction)}`);
+if (record?.exact?.transaction) console.log(`Share transfer: ${tx(record.exact.transaction)}`);
 process.exit(bought.ok && record?.state === "collected" ? 0 : 1);
