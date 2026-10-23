@@ -93,21 +93,26 @@ export interface LogChain {
   authorizationUsed?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean>;
   /**
    * Optional: whether the chain shows this authorization cancelled (EIP-3009 cancelAuthorization;
-   * USDC emits AuthorizationCanceled for its nonce). USDC's authorizationState reads true for a
+   * USDC emits AuthorizationCanceled(authorizer, nonce)). Match both: anyone can cancel the same
+   * nonce under their own address, and a share's nonce is public. USDC's authorizationState reads true for a
    * cancelled authorization as for a used one, but a cancelled one never executed and never can,
    * so with this a cancelled share is uncollected as an unused one is ("Share kinds": "an
-   * `AuthorizationCanceled` event for its nonce"). Without it, a cancelled share stays queued.
+   * `AuthorizationCanceled` event for the payer's address and its nonce"). Without it, a
+   * cancelled share stays queued.
    */
   authorizationCanceled?(accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean>;
   /**
    * Optional: the timestamp of the latest block, in Unix seconds. Block time decides whether an
    * exact share's validBefore has passed ("Share kinds"): the log reads this first, and reads
    * authorizationUsed and authorizationCanceled only once it is at or after validBefore, so they
-   * must read the chain at that block or a later one. Without it, the log takes its own clock,
-   * `expiryMarginSeconds` past validBefore, as standing for such a block: an assumption about
-   * how far block timestamps lag, which a LogChain that can read a block should not leave to it.
+   * must read the chain at that block or a later one. Without it the log cannot show that a
+   * block at or after validBefore exists, so it never reports an exact share uncollected: the
+   * share stays queued, as without authorizationUsed. A LogChain that supplies authorizationUsed
+   * should supply this too. It is given the share being looked at, which a chain that reads the
+   * latest block ignores, and a chain that answers from its own records (a journal replayed on
+   * restart) uses to answer for that share.
    */
-  blockTime?(): Promise<number>;
+  blockTime?(accepted?: PaymentRequirements, payload?: ExactEip3009Payload): Promise<number>;
   /**
    * Optional: check an `exact` share with the facilitator's own scheme code, "as /verify and
    * /settle would", with paymentPayload {x402Version: 2, accepted, payload} and
@@ -184,12 +189,6 @@ export interface SolidarityLogOptions {
    */
   claimGraceSeconds?: number;
   /**
-   * For a LogChain without `blockTime` only: how long after an exact share's validBefore, on the
-   * log's clock, the log takes the chain's latest block to be at or after it, since block
-   * timestamps can lag that clock. Default 30 seconds.
-   */
-  expiryMarginSeconds?: number;
-  /**
    * Stores each statement durably before it is published or sent to a witness or the fund (see
    * LogBookOptions.persist). Without it, keeping the statement (or `issuedAt` with every other
    * input) before publishing it is the caller's job.
@@ -212,7 +211,6 @@ export class SolidarityLog {
   private readonly chain: LogChain;
   private readonly clock: () => number;
   private readonly claimGraceSeconds: number;
-  private readonly expiryMarginSeconds: number;
   private acceptingShares = true;
 
   private readonly shares = new Map<string, ShareRecord>();
@@ -228,7 +226,6 @@ export class SolidarityLog {
     this.book = new LogBook(opts.descriptor, opts.key, { persist: opts.persistStatement, clock: this.clock });
     this.chain = opts.chain;
     this.claimGraceSeconds = opts.claimGraceSeconds ?? 14 * 86400;
-    this.expiryMarginSeconds = opts.expiryMarginSeconds ?? 30;
   }
 
   // ---- verify --------------------------------------------------------------
@@ -694,10 +691,10 @@ export class SolidarityLog {
    * share uncollected until the chain, read at a block whose timestamp is at
    * or after validBefore, shows that no transfer under the authorization
    * executed (EIP-3009 authorizationState false, or an AuthorizationCanceled
-   * event for its nonce)" ("Share kinds"). The latest block's time is read
-   * first (LogChain.blockTime), so the state read after it is at that block
-   * or a later one. Without blockTime, the log's clock past validBefore by
-   * expiryMarginSeconds stands for such a block.
+   * event for the payer's address and its nonce)" ("Share kinds"). The
+   * latest block's time is read first (LogChain.blockTime), so the state read
+   * after it is at that block or a later one. Without blockTime nothing shows
+   * such a block, so the share stays queued.
    */
   private async cannotExecute(ex: NonNullable<ShareRecord["exact"]>): Promise<boolean> {
     if (!this.chain.authorizationUsed) return false;
@@ -708,9 +705,9 @@ export class SolidarityLog {
       return false;
     }
     if (BigInt(this.clock()) < validBefore) return false;
-    if (this.chain.blockTime) {
-      if (BigInt(await this.chain.blockTime()) < validBefore) return false;
-    } else if (BigInt(this.clock()) < validBefore + BigInt(this.expiryMarginSeconds)) return false;
+    // "Block time decides, not the log's clock": without blockTime, no block is known to be past validBefore.
+    if (!this.chain.blockTime) return false;
+    if (BigInt(await this.chain.blockTime(ex.accepted, ex.payload)) < validBefore) return false;
     if ((await this.chain.authorizationUsed(ex.accepted, ex.payload)) === false) return true;
     return (await this.chain.authorizationCanceled?.(ex.accepted, ex.payload)) === true;
   }

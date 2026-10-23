@@ -284,7 +284,7 @@ test("a share whose transfer cannot be submitted: purchase settled, share accept
             throw new Error("rpc down");
           },
         },
-        readsState ? { fallback: { authorizationUsed: (a, p) => w.chain.authorizationUsed(a, p) } } : {},
+        readsState ? { fallback: { authorizationUsed: (a, p) => w.chain.authorizationUsed(a, p), blockTime: async () => Math.floor(Date.now() / 1000) } } : {},
       ),
     });
     const ext = solidarityFacilitator({ log });
@@ -337,7 +337,7 @@ test("a share settle that fails with a transaction (a reverted transfer) is unco
     key: w.logKey,
     chain: facilitatorLogChain(
       { settle: async () => ({ success: false, errorReason: "transaction_failed", transaction: `0x${"ab".repeat(32)}`, network: NET }) },
-      { fallback: { authorizationUsed: (a, p) => w.chain.authorizationUsed(a, p) } },
+      { fallback: { authorizationUsed: (a, p) => w.chain.authorizationUsed(a, p), blockTime: async () => Math.floor(Date.now() / 1000) } },
     ),
   });
   const ext = solidarityFacilitator({ log });
@@ -366,5 +366,5 @@ test("blockTime comes through `fallback`, so block time, not the log's clock, de
     },
   };
   assert.equal(await facilitatorLogChain({ settle }, { fallback: fb }).blockTime?.(), 1793000000, "called on the fallback");
-  assert.equal(facilitatorLogChain({ settle }).blockTime, undefined, "without it the log falls back to its clock and margin");
+  assert.equal(facilitatorLogChain({ settle }).blockTime, undefined, "without it the log never reports an exact share uncollected: block time decides");
 });

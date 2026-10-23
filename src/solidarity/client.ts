@@ -277,9 +277,14 @@ async function buildShareOrThrow(ctx: ShareContext, input: BuildShareInput): Pro
   let ch: ClientChannel | undefined;
   let max = "";
   if (kind === "exact") {
-    // At least maxTimeoutSeconds after the purchase's validBefore, so the log can still
-    // submit the transfer after the purchase settles.
+    // ("Share kinds") At least the share's maxTimeoutSeconds after the purchase's validBefore, so
+    // the log can still submit the transfer after the purchase settles, and at most the purchase's
+    // maxTimeoutSeconds plus the share's after now. A purchase window longer than its own
+    // maxTimeoutSeconds leaves no validBefore that meets both, so the share is left out.
     const purchaseEnd = input.purchaseWindow ? Number(input.purchaseWindow.validBefore) : now + entry.maxTimeoutSeconds;
+    if (purchaseEnd > now + Number(req.maxTimeoutSeconds)) {
+      return { attached: false, why: "the purchase's validBefore is more than its maxTimeoutSeconds away, so no share validBefore fits the log's bound" };
+    }
     validBefore = purchaseEnd + entry.maxTimeoutSeconds;
   } else {
     ch = input.channel as ClientChannel;

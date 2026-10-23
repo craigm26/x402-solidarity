@@ -201,6 +201,22 @@ export class JournalChain implements LogChain {
     return r.found ? { ...r.found, value: BigInt(r.found.value) } : undefined;
   }
 
+  /**
+   * Answers from the share's recorded result, like authorizationUsed: the engine records a final
+   * answer only after it read a block at or after validBefore, and keeps that block's time in the
+   * row. Rows from before it kept it carry a decision already made, so they answer validBefore.
+   */
+  async blockTime(_accepted?: PaymentRequirements, payload?: ExactEip3009Payload): Promise<number> {
+    if (!payload) throw new Error("blockTime: this chain answers only for a share");
+    const nonce = payload.authorization.nonce.toLowerCase();
+    const r = this.backend.recorded("result", nonce) as { blockTime?: unknown } | undefined;
+    if (r) return typeof r.blockTime === "number" ? r.blockTime : Number(payload.authorization.validBefore);
+    const why = `no recorded submission to read the block time from for share nonce ${nonce}`;
+    if (this.mode === "replay") this.divergence.push(`replay: ${why}`);
+    else this.fault ??= new Error(why);
+    throw new Error(why);
+  }
+
   async authorizationUsed(_accepted: PaymentRequirements, payload: ExactEip3009Payload): Promise<boolean> {
     const nonce = payload.authorization.nonce.toLowerCase();
     const r = this.backend.recorded("result", nonce);

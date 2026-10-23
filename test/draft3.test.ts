@@ -440,15 +440,26 @@ async function world(opts: { now?: number; descriptor?: LogDescriptor; logChain?
   const req = (amount = "48000000"): PaymentRequirements => ({ scheme: "exact", network: NET, amount, asset: USDC, payTo: "0x2222222222222222222222222222222222222222", maxTimeoutSeconds: 60, extra: { name: "USDC", version: "2" } });
   const payload = (accepted: PaymentRequirements, info: SolidarityInfo): PaymentPayload => ({ x402Version: 2, accepted, payload: {}, extensions: { solidarity: { info, schema: S.solidaritySchema } } });
   const ok = (extra: Partial<SettleResponse> = {}): SettleResponse => ({ success: true, transaction: "0xpurchase", network: NET, payer: agent.address, ...extra });
-  /** The agent signs a purchase (valid 60 s, or until `purchaseEnd`) and its exact share (valid 60 s longer). */
+  /**
+   * The agent signs a purchase (valid 60 s, or until `purchaseEnd`) and its exact share (valid 60 s
+   * longer). A conforming client leaves the share out when `purchaseEnd` is more than the purchase's
+   * maxTimeoutSeconds away ("Share kinds"); past that, this signs it as a client that ignores the
+   * rule would, so the log's own bound can be tested.
+   */
   async function share(accepted = req(), purchaseEnd = chain.now + 60) {
+    const conforming = Math.min(purchaseEnd, chain.now + Number(accepted.maxTimeoutSeconds));
     const d = await S.buildShare(
       { policy: POLICY, counter, signer: agent, descriptor, now: chain.now },
-      { declared: { version: 2, logs: [{ network: NET, scheme: "exact", log: descriptor.log }] }, accepted, purchaseWindow: { validAfter: String(chain.now - 60), validBefore: String(purchaseEnd) } },
+      { declared: { version: 2, logs: [{ network: NET, scheme: "exact", log: descriptor.log }] }, accepted, purchaseWindow: { validAfter: String(chain.now - 60), validBefore: String(conforming) } },
     );
     assert.ok(d.attached, d.attached ? "" : d.why);
     const info = (d as Extract<S.ShareDecision, { attached: true }>).info;
-    const auth = (info.payment?.payload as unknown as S.ExactEip3009Payload).authorization;
+    const pay = info.payment as unknown as { accepted: PaymentRequirements; payload: S.ExactEip3009Payload };
+    if (purchaseEnd !== conforming) {
+      const a = pay.payload.authorization;
+      pay.payload = await S.signEip3009(agent, pay.accepted, { validAfter: a.validAfter, validBefore: String(purchaseEnd + Number(pay.accepted.maxTimeoutSeconds)), nonce: a.nonce as `0x${string}` });
+    }
+    const auth = pay.payload.authorization;
     return { info, id: info.id as string, auth, accepted };
   }
   /** Settle the purchase and hand the share to the log. */
@@ -466,9 +477,10 @@ async function world(opts: { now?: number; descriptor?: LogDescriptor; logChain?
  * `behind`, it finds no transfer and reads every authorization unused. While
  * `lostAnswers`, a submit runs on the chain but its answer is lost.
  */
-function laggingView(chain: SimulatedChain) {
+function laggingView(chain: SimulatedChain, opts: { blockTime?: boolean } = {}) {
   const v = { behind: false, lostAnswers: false, submits: 0 };
   const view: S.LogChain = {
+    ...(opts.blockTime === false ? {} : { blockTime: () => chain.blockTime() }),
     submitExact: async (a, p) => {
       v.submits++;
       const r = await chain.submitExact(a, p);
@@ -537,11 +549,11 @@ test("Share kinds: block time, not the log's clock, decides that validBefore has
   assert.deepEqual(reads, ["blockTime", "authorizationState"], "block time first, so the state read is at that block or a later one");
   assert.equal(w.state(s.id), "uncollected");
 
-  // Without blockTime: the log's clock, expiryMarginSeconds (30) past validBefore.
+  // Without blockTime: block time decides, and no block is known to be past validBefore, so the share stays queued.
   let lag: ReturnType<typeof laggingView> | undefined;
   const m = await world({
     logChain: (c) => {
-      lag = laggingView(c);
+      lag = laggingView(c, { blockTime: false });
       return lag.view;
     },
   });
@@ -551,9 +563,9 @@ test("Share kinds: block time, not the log's clock, decides that validBefore has
   m.chain.now = Number(t.auth.validBefore) + 29;
   await m.log.reconcileExact();
   assert.equal(m.state(t.id), "queued");
-  m.chain.now = Number(t.auth.validBefore) + 30;
+  m.chain.now = Number(t.auth.validBefore) + 86400;
   await m.log.reconcileExact();
-  assert.equal(m.state(t.id), "uncollected");
+  assert.equal(m.state(t.id), "queued", "a day past validBefore on the log's clock is still not block time");
   assert.equal(lag?.view.blockTime, undefined);
 });
 

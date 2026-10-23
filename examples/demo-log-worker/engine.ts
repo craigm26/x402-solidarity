@@ -555,7 +555,7 @@ export class Engine {
             throw new NotYet(`the latest block (time ${blockTime}) is still before validBefore (${validBefore}) of ${a.nonce.toLowerCase()}; it is looked at again on the next alarm or tick`);
           }
           // Unused, read at a block at or after validBefore: it can never execute now.
-          return { ok: false, error: lastError ?? "not executed before validBefore", via: "chain", used: false };
+          return { ok: false, error: lastError ?? "not executed before validBefore", via: "chain", used: false, blockTime };
         }
       }
       check = true;

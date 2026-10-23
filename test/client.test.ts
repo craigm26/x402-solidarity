@@ -44,6 +44,21 @@ test("USDC on Base Sepolia: address and EIP-712 domain as the x402 repo lists th
   assert.match(bs, /name: "x402 Batch Settlement",\s*version: "1"/);
 });
 
+test("an exact share's validBefore: after the purchase's, within the bound the log checks; no share when none fits", async () => {
+  const c = ctx();
+  const ok = await S.buildShare(c, { declared, accepted: req("48000000"), purchaseWindow: { validAfter: String(NOW - 60), validBefore: String(NOW + 60) } });
+  assert.ok(ok.attached);
+  if (ok.attached) {
+    const vb = Number((ok.info.payment as { payload: { authorization: { validBefore: string } } }).payload.authorization.validBefore);
+    const shareMax = DESCRIPTOR.accepts?.[0].maxTimeoutSeconds as number;
+    assert.ok(vb >= NOW + 60 + shareMax, "at least the share's timeout after the purchase's validBefore");
+    assert.ok(vb <= NOW + 60 + shareMax, "at most the purchase's timeout plus the share's after signing");
+  }
+  const long = await S.buildShare(ctx(), { declared, accepted: req("48000000"), purchaseWindow: { validAfter: String(NOW - 60), validBefore: String(NOW + 3600) } });
+  assert.equal(long.attached, false, "a purchase window longer than its own maxTimeoutSeconds leaves no valid share window");
+  if (!long.attached) assert.match(long.why, /maxTimeoutSeconds/);
+});
+
 test("separate mode: an exact share for a 48 USDC purchase, signed with EIP-3009", async () => {
   const c = ctx();
   const window = { validAfter: String(NOW - 60), validBefore: String(NOW + 30) };
